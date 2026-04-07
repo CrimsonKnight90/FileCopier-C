@@ -56,6 +56,7 @@ set(SOURCES
     src/ui/MainWindow.cpp
     src/ui/ProgressPanel.cpp
     src/ui/ErrorDialog.cpp
+    src/ui/ErrorLog.cpp
 
     # Utils
     src/utils/Logger.cpp
