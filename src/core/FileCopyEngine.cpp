@@ -1,4 +1,5 @@
 #include "../../include/FileCopyEngine.h"
+#include <algorithm>
 #include "../../include/BufferManager.h"
 #include "../../include/EventBus.h"
 #include "../../include/Utils.h"
@@ -127,7 +128,7 @@ bool FileCopyEngine::CopyWithOverlapped(
         while (m_paused && !m_cancelled) ::Sleep(50);
         if (m_cancelled) { ok = false; break; }
 
-        DWORD toRead = static_cast<DWORD>(min((LONGLONG)BUF, fileSize - offset));
+        DWORD toRead = static_cast<DWORD>(std::min<LONGLONG>(BUF, fileSize - offset));
         // Ajuste para NO_BUFFERING: redondear al sector
         if (m_opts.useNoBuffering) {
             toRead = (toRead + 511) & ~511u;
@@ -146,7 +147,7 @@ bool FileCopyEngine::CopyWithOverlapped(
         if (bytesRead == 0) break;
 
         // Recortar a tamaño real (puede haber padding por sector)
-        DWORD toWrite = min(bytesRead, static_cast<DWORD>(fileSize - copied));
+        DWORD toWrite = std::min<DWORD>(bytesRead, static_cast<DWORD>(fileSize - copied));
 
         setOffset(ovWrite, copied);
         ::ResetEvent(ovWrite.hEvent);
@@ -195,7 +196,7 @@ bool FileCopyEngine::CopyBuffered(
         while (m_paused && !m_cancelled) ::Sleep(50);
         if (m_cancelled) { ok = false; break; }
 
-        DWORD toRead = static_cast<DWORD>(min((LONGLONG)m_opts.bufferSize, fileSize - copied));
+        DWORD toRead = static_cast<DWORD>(std::min<LONGLONG>(m_opts.bufferSize, fileSize - copied));
         DWORD bytesRead = 0, bytesWritten = 0;
 
         if (!::ReadFile(hSrc, buf.Data(), toRead, &bytesRead, nullptr) || bytesRead == 0)
