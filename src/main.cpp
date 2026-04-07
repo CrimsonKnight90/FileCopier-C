@@ -1,6 +1,6 @@
-// main.cpp
-// Punto de entrada de FileCopier.
-// NO incluye otros .cpp — cada unidad de compilación se compila una sola vez.
+<FILE filename="src/main.cpp" size="2487 bytes">
+// main.cpp - Versión corregida para Qt 6 + MinGW + WIN32
+// NO define wWinMain → Qt lo maneja automáticamente
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -10,23 +10,20 @@
 
 #include "../include/Utils.h"
 #include "../include/EventBus.h"
+#include "../include/ui/MainWindow.h"
 
 #include <QApplication>
 #include <QSettings>
 #include <QStyleFactory>
 #include <QString>
 #include <vector>
-#include <string>
-
-// Las clases MainWindow, ProgressPanel, etc. se declaran en sus propios .h
-// y se compilan en sus propios .cpp — main.cpp solo instancia MainWindow.
-#include "../include/ui/MainWindow.h"
 
 using namespace FileCopier;
 
 // ─────────────────────────────────────────────────────────────────────────────
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
+int main(int argc, char* argv[])
 {
+    // Convertimos argumentos Windows a estilo Qt (compatible con MinGW)
     int wargc = 0;
     LPWSTR* wargv = ::CommandLineToArgvW(::GetCommandLineW(), &wargc);
 
@@ -38,10 +35,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     }
     ::LocalFree(wargv);
 
-    std::vector<char*> argPtrs;
-    argPtrs.reserve(argStrs.size());
-    for (auto& s : argStrs) argPtrs.push_back(s.data());
-    int argc = static_cast<int>(argPtrs.size());
+    std::vector<char*> argPtrs(argStrs.size());
+    for (size_t i = 0; i < argStrs.size(); ++i)
+        argPtrs[i] = argStrs[i].data();
 
     QApplication app(argc, argPtrs.data());
     app.setApplicationName("FileCopier");
@@ -49,6 +45,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     app.setOrganizationName("FileCopierDev");
     app.setStyle(QStyleFactory::create("Fusion"));
 
+    // Cargar configuración
     auto& cfg = ConfigManager::Instance();
     if (!cfg.Load(L"filecopier.ini"))
         cfg.Save(L"filecopier.ini");
@@ -62,13 +59,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     if (settings.contains("geometry"))
         window.restoreGeometry(settings.value("geometry").toByteArray());
     else
-        window.resize(900, 650);
+        window.resize(1100, 720);
 
     window.show();
+
     int ret = app.exec();
 
     settings.setValue("geometry", window.saveGeometry());
     LOG_INFO(L"=== FileCopier exited ===");
     EventBus::Instance().ClearAll();
+
     return ret;
 }
+</FILE>

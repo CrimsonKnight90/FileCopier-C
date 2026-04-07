@@ -1,3 +1,4 @@
+<FILE filename="CMakeLists.txt" size="5623 bytes">
 cmake_minimum_required(VERSION 3.20)
 project(FileCopier VERSION 1.0.0 LANGUAGES CXX)
 
@@ -7,25 +8,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ── Qt ───────────────────────────────────────────────────────────────────────
-# Ajustar CMAKE_PREFIX_PATH si Qt no está en PATH:
-#   cmake -DCMAKE_PREFIX_PATH="C:/Qt/6.7.0/msvc2022_64" ..
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
 qt_standard_project_setup()
 
-# ── Flags de optimización ────────────────────────────────────────────────────
+# ── Flags de optimización (MinGW + MSVC) ─────────────────────────────────────
 if(MSVC)
-    add_compile_options(
-        /W4           # Warning level 4
-        /WX-          # No tratar warnings como errores (quitar - para producción)
-        /O2           # Optimización máxima
-        /GL           # Link-time code generation
-        /MP           # Compilación en paralelo
-        /utf-8        # Fuentes en UTF-8
-    )
-    add_link_options(/LTCG)   # Link-time optimization
+    add_compile_options(/W4 /O2 /GL /MP /utf-8)
+    add_link_options(/LTCG)
 else()
-    # MinGW / GCC / Clang
-    add_compile_options(-O2 -Wall -Wextra -municode)
+    # MinGW/GCC
+    add_compile_options(-O3 -Wall -Wextra -municode -pthread)
+    add_link_options(-pthread)
 endif()
 
 # ── Definiciones globales ────────────────────────────────────────────────────
@@ -34,7 +27,7 @@ add_compile_definitions(
     NOMINMAX
     UNICODE
     _UNICODE
-    _WIN32_WINNT=0x0A00   # Windows 10+
+    _WIN32_WINNT=0x0A00
 )
 
 # ── Fuentes ──────────────────────────────────────────────────────────────────
@@ -52,7 +45,7 @@ set(SOURCES
     src/jobs/JobState.cpp
     src/jobs/ResumeManager.cpp
 
-    # UI  (contienen Q_OBJECT → Qt MOC los procesa automáticamente)
+    # UI
     src/ui/MainWindow.cpp
     src/ui/ProgressPanel.cpp
     src/ui/ErrorDialog.cpp
@@ -80,7 +73,7 @@ set(HEADERS
 )
 
 # ── Ejecutable ───────────────────────────────────────────────────────────────
-# WIN32 → subsistema Windows (no abre consola)
+# WIN32 → subsistema Windows (sin consola)
 qt_add_executable(FileCopier WIN32
     ${SOURCES}
     ${HEADERS}
@@ -97,16 +90,9 @@ target_link_libraries(FileCopier PRIVATE
     Qt6::Core
     Qt6::Widgets
     shlwapi
-    # WinAPI ya está disponible implícitamente en MSVC/MinGW con _WIN32_WINNT
 )
 
-# ── Recurso de icono (opcional) ───────────────────────────────────────────────
-if(EXISTS "${CMAKE_SOURCE_DIR}/resources/app.rc")
-    target_sources(FileCopier PRIVATE resources/app.rc)
-endif()
-
-# ── Despliegue Qt (windeployqt) ───────────────────────────────────────────────
-# Copia las DLLs de Qt junto al ejecutable en el build directory.
+# ── Despliegue Qt (windeployqt) ──────────────────────────────────────────────
 if(WIN32)
     find_program(WINDEPLOYQT windeployqt HINTS "${Qt6_DIR}/../../../bin")
     if(WINDEPLOYQT)
@@ -120,7 +106,7 @@ if(WIN32)
     endif()
 endif()
 
-# ── Información de build ──────────────────────────────────────────────────────
+# ── Información de build ─────────────────────────────────────────────────────
 message(STATUS "")
 message(STATUS "=== FileCopier build configuration ===")
 message(STATUS "  Build type   : ${CMAKE_BUILD_TYPE}")
@@ -129,3 +115,4 @@ message(STATUS "  Qt version   : ${Qt6_VERSION}")
 message(STATUS "  Compiler     : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "=======================================")
 message(STATUS "")
+</FILE>
