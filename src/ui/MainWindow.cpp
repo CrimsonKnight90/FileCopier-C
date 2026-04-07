@@ -169,7 +169,7 @@ private slots:
             .arg(path).arg(total / 1024.0 / 1024.0, 0, 'f', 2));
         m_logList->scrollToBottom();
     }
-    void OnUIProgress(const QString& path, qint64 done, qint64 total) {
+    void OnUIProgress(const QString& /*path*/, qint64 done, qint64 total) {
         if (total > 0) {
             int pct = static_cast<int>(done * 100 / total);
             m_globalBar->setValue(pct);
@@ -179,7 +179,7 @@ private slots:
         m_logList->addItem(QString("[ERR] %1 — %2").arg(path).arg(msg));
         m_logList->scrollToBottom();
     }
-    void OnUISpeed(double mbps, qint64 done, qint64 total) {
+    void OnUISpeed(double mbps, qint64 /*done*/, qint64 /*total*/) {
         m_speedLabel->setText(QString("%1 MB/s").arg(mbps, 0, 'f', 1));
     }
 

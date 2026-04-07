@@ -49,8 +49,7 @@ public:
         m_pathLabel = new QLabel(path);
         m_pathLabel->setStyleSheet("color: gray; font-size: 10px;");
         m_pathLabel->setWordWrap(false);
-        m_pathLabel->setElideMode(Qt::ElideLeft);  // recorta por la izquierda (más útil para rutas)
-        // QLabel no tiene setElideMode; usamos setSizePolicy + toolTip
+        // QLabel no tiene setElideMode; el truncado se hace con toolTip
         m_pathLabel->setToolTip(path);
         layout->addWidget(m_pathLabel);
 
