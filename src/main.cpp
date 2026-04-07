@@ -1,7 +1,3 @@
-<FILE filename="src/main.cpp" size="2487 bytes">
-// main.cpp - Versión corregida para Qt 6 + MinGW + WIN32
-// NO define wWinMain → Qt lo maneja automáticamente
-
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -21,9 +17,10 @@
 using namespace FileCopier;
 
 // ─────────────────────────────────────────────────────────────────────────────
-int main(int argc, char* argv[])
+// qMain → Requerido por Qt 6 + MinGW (evita error __imp___argc)
+int qMain(int argc, char* argv[])
 {
-    // Convertimos argumentos Windows a estilo Qt (compatible con MinGW)
+    // Convertimos argumentos Windows a estilo Qt
     int wargc = 0;
     LPWSTR* wargv = ::CommandLineToArgvW(::GetCommandLineW(), &wargc);
 
@@ -71,4 +68,3 @@ int main(int argc, char* argv[])
 
     return ret;
 }
-</FILE>

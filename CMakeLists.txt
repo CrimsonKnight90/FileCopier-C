@@ -1,4 +1,3 @@
-<FILE filename="CMakeLists.txt" size="5623 bytes">
 cmake_minimum_required(VERSION 3.20)
 project(FileCopier VERSION 1.0.0 LANGUAGES CXX)
 
@@ -115,4 +114,3 @@ message(STATUS "  Qt version   : ${Qt6_VERSION}")
 message(STATUS "  Compiler     : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "=======================================")
 message(STATUS "")
-</FILE>
