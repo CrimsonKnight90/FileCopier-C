@@ -91,6 +91,7 @@ target_include_directories(FileCopier PRIVATE
 target_link_libraries(FileCopier PRIVATE
     Qt6::Core
     Qt6::Widgets
+    shlwapi
     # WinAPI ya está disponible implícitamente en MSVC/MinGW con _WIN32_WINNT
 )
 

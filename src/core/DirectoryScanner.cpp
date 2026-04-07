@@ -1,5 +1,6 @@
 #include "../../include/DirectoryScanner.h"
 #include "../../include/Utils.h"
+#include <shlwapi.h>
 
 namespace FileCopier {
 
