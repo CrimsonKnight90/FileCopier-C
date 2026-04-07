@@ -16,7 +16,7 @@ ConfigManager& ConfigManager::Instance() {
 //   bufferSizeKB=1024
 // ─────────────────────────────────────────────────────────────────────────────
 bool ConfigManager::Load(const std::wstring& iniPath) {
-    std::wifstream f(iniPath);
+    std::wifstream f(iniPath.c_str());
     if (!f) return false;
 
     std::map<std::wstring, std::wstring> kv;
@@ -61,7 +61,7 @@ bool ConfigManager::Load(const std::wstring& iniPath) {
 }
 
 bool ConfigManager::Save(const std::wstring& iniPath) const {
-    std::wofstream f(iniPath);
+    std::wofstream f(iniPath.c_str());
     if (!f) return false;
 
     f << L"; FileCopier configuration\n";

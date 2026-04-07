@@ -25,7 +25,7 @@ static std::wstring EscapeJson(const std::wstring& s) {
 }
 
 void ResumeManager::Save(const std::vector<Job>& jobs) {
-    std::wofstream f(m_stateFile);
+    std::wofstream f(m_stateFile.c_str());
     if (!f) {
         LOG_WARNING(L"ResumeManager: cannot write state file");
         return;
@@ -51,7 +51,7 @@ void ResumeManager::Save(const std::vector<Job>& jobs) {
 
 bool ResumeManager::Load(std::vector<ResumeEntry>& entries) {
     entries.clear();
-    std::wifstream f(m_stateFile);
+    std::wifstream f(m_stateFile.c_str());
     if (!f) return false;
 
     std::wstringstream ss;

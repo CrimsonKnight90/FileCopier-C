@@ -13,7 +13,7 @@ Logger& Logger::Instance() {
 
 void Logger::Init(const std::wstring& logFilePath) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_file.open(logFilePath, std::ios::app);
+    m_file.open(logFilePath.c_str(), std::ios::app);
     if (!m_file)
         std::wcerr << L"[Logger] Cannot open log file: " << logFilePath << L"\n";
 }
