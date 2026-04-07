@@ -1,26 +1,26 @@
 cmake_minimum_required(VERSION 3.20)
 project(FileCopier VERSION 1.0.0 LANGUAGES CXX)
 
-# ── Estándar C++ ─────────────────────────────────────────────────────────────
+# ── Estándar C++ ─────────────────────────────────────────────
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# ── Qt ───────────────────────────────────────────────────────────────────────
+# ── Qt ───────────────────────────────────────────────────────
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
 qt_standard_project_setup()
 
-# ── Flags de optimización (MinGW + MSVC) ─────────────────────────────────────
+# ── Flags de compilación ─────────────────────────────────────
 if(MSVC)
     add_compile_options(/W4 /O2 /GL /MP /utf-8)
     add_link_options(/LTCG)
 else()
-    # MinGW/GCC
-    add_compile_options(-O3 -Wall -Wextra -municode -pthread)
+    # MinGW / GCC
+    add_compile_options(-O3 -Wall -Wextra -pthread)
     add_link_options(-pthread)
 endif()
 
-# ── Definiciones globales ────────────────────────────────────────────────────
+# ── Definiciones globales ────────────────────────────────────
 add_compile_definitions(
     WIN32_LEAN_AND_MEAN
     NOMINMAX
@@ -29,7 +29,7 @@ add_compile_definitions(
     _WIN32_WINNT=0x0A00
 )
 
-# ── Fuentes ──────────────────────────────────────────────────────────────────
+# ── Fuentes ─────────────────────────────────────────────────
 set(SOURCES
     src/main.cpp
 
@@ -71,29 +71,29 @@ set(HEADERS
     include/ui/ErrorLog.h
 )
 
-# ── Ejecutable ───────────────────────────────────────────────────────────────
-# WIN32 → subsistema Windows (sin consola)
+# ── Ejecutable ───────────────────────────────────────────────
 qt_add_executable(FileCopier WIN32
     ${SOURCES}
     ${HEADERS}
 )
 
-# ── Includes ─────────────────────────────────────────────────────────────────
+# ── Includes ─────────────────────────────────────────────────
 target_include_directories(FileCopier PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/include/ui
 )
 
-# ── Links ────────────────────────────────────────────────────────────────────
+# ── Librerías ────────────────────────────────────────────────
 target_link_libraries(FileCopier PRIVATE
     Qt6::Core
     Qt6::Widgets
     shlwapi
 )
 
-# ── Despliegue Qt (windeployqt) ──────────────────────────────────────────────
+# ── Deploy Qt ────────────────────────────────────────────────
 if(WIN32)
     find_program(WINDEPLOYQT windeployqt HINTS "${Qt6_DIR}/../../../bin")
+
     if(WINDEPLOYQT)
         add_custom_command(TARGET FileCopier POST_BUILD
             COMMAND ${WINDEPLOYQT}
@@ -105,7 +105,7 @@ if(WIN32)
     endif()
 endif()
 
-# ── Información de build ─────────────────────────────────────────────────────
+# ── Info de build ────────────────────────────────────────────
 message(STATUS "")
 message(STATUS "=== FileCopier build configuration ===")
 message(STATUS "  Build type   : ${CMAKE_BUILD_TYPE}")
