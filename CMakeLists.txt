@@ -73,6 +73,10 @@ set(HEADERS
     include/Jobs.h
     include/Utils.h
     include/EventBus.h
+    include/ui/MainWindow.h
+    include/ui/ProgressPanel.h
+    include/ui/ErrorDialog.h
+    include/ui/ErrorLog.h
 )
 
 # ── Ejecutable ───────────────────────────────────────────────────────────────
@@ -85,6 +89,7 @@ qt_add_executable(FileCopier WIN32
 # ── Includes ─────────────────────────────────────────────────────────────────
 target_include_directories(FileCopier PRIVATE
     ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/include/ui
 )
 
 # ── Links ────────────────────────────────────────────────────────────────────
