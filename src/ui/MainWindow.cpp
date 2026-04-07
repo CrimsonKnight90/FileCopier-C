@@ -89,6 +89,7 @@ private:
 // ── MainWindow ────────────────────────────────────────────────────────────────
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle("FileCopier");
+    setMinimumSize(640, 480);
     BuildUI();
     ConnectEventBus();
 }
