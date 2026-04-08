@@ -56,7 +56,7 @@ public slots:
 
         EventBus::Instance().Emit(EventFileStarted{ L"__scanning__", 0 });
         scanner.Scan(m_src.toStdWString(), m_dst.toStdWString(), entries,
-            [](size_t n) { /* scan progress */ });
+            [](size_t /*n*/) { /* scan progress */ });
 
         int totalFiles = 0;
         for (auto& e : entries) if (!e.isDirectory) ++totalFiles;
@@ -139,7 +139,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     if (m_copying) {
         auto btn = QMessageBox::question(this,
             TR("app.title"),
-            "¿Cancelar la copia en curso y salir?",
+            TR("msg.confirmCancel"),
             QMessageBox::Yes | QMessageBox::No);
         if (btn != QMessageBox::Yes) { event->ignore(); return; }
         emit requestCancel();
@@ -258,7 +258,7 @@ void MainWindow::BuildCopyListTab(QWidget* parent) {
     // Lista
     m_copyList = new QTreeWidget;
     m_copyList->setColumnCount(4);
-    m_copyList->setHeaderLabels({
+    m_copyList->setHeaderLabels(QStringList{
         TR("col.source"), TR("col.size"),
         TR("col.dest"),   TR("col.status")
     });
@@ -270,21 +270,21 @@ void MainWindow::BuildCopyListTab(QWidget* parent) {
 
     // Botones laterales
     auto* vBtns = new QVBoxLayout;
-    auto mkBtn = [&](QPushButton*& ptr, const char* key) {
-        ptr = new QPushButton(TR(key));
+    auto mkBtn = [&](QPushButton*& ptr, const QString& label) {
+        ptr = new QPushButton(label);
         ptr->setMaximumWidth(130);
         vBtns->addWidget(ptr);
     };
-    mkBtn(m_btnToTop,    "btn.toTop");
-    mkBtn(m_btnUp,       "btn.up");
-    mkBtn(m_btnDown,     "btn.down");
-    mkBtn(m_btnToBottom, "btn.toBottom");
+    mkBtn(m_btnToTop,    TR("btn.toTop"));
+    mkBtn(m_btnUp,       TR("btn.up"));
+    mkBtn(m_btnDown,     TR("btn.down"));
+    mkBtn(m_btnToBottom, TR("btn.toBottom"));
     vBtns->addSpacing(8);
-    mkBtn(m_btnAddFiles, "btn.addFiles");
-    mkBtn(m_btnRemove,   "btn.remove");
+    mkBtn(m_btnAddFiles, TR("btn.addFiles"));
+    mkBtn(m_btnRemove,   TR("btn.remove"));
     vBtns->addSpacing(8);
-    mkBtn(m_btnSaveList, "btn.save");
-    mkBtn(m_btnLoadList, "btn.load");
+    mkBtn(m_btnSaveList, TR("btn.save"));
+    mkBtn(m_btnLoadList, TR("btn.load"));
     vBtns->addStretch();
     h->addLayout(vBtns);
 
@@ -305,7 +305,7 @@ void MainWindow::BuildErrorTab(QWidget* parent) {
 
     m_errorList = new QTreeWidget;
     m_errorList->setColumnCount(4);
-    m_errorList->setHeaderLabels({
+    m_errorList->setHeaderLabels(QStringList{
         TR("col.time"), TR("col.action"),
         TR("col.target"), TR("col.errtext")
     });
@@ -355,9 +355,9 @@ void MainWindow::BuildOptionsTab(QWidget* parent) {
     // ── Colisiones ────────────────────────────────────────────────────────
     auto* grpCol = new QGroupBox(TR("opt.collision"));
     auto* hCol = new QHBoxLayout(grpCol);
-    hCol->addWidget(new QLabel(TR("opt.collision") + QString(":")));
+    hCol->addWidget(new QLabel(TR("opt.collision") + ":"));
     m_cmbCollision = new QComboBox;
-    m_cmbCollision->addItems({
+    m_cmbCollision->addItems(QStringList{
         TR("opt.col.ask"), TR("opt.col.cancel"), TR("opt.col.skip"),
         TR("opt.col.overwrite"), TR("opt.col.overwriteD"),
         TR("opt.col.renameNew"), TR("opt.col.renameOld")
@@ -369,9 +369,9 @@ void MainWindow::BuildOptionsTab(QWidget* parent) {
     // ── Errores de copia ──────────────────────────────────────────────────
     auto* grpErr = new QGroupBox(TR("opt.copyErr"));
     auto* hErr = new QHBoxLayout(grpErr);
-    hErr->addWidget(new QLabel(TR("opt.copyErr") + QString(":")));
+    hErr->addWidget(new QLabel(TR("opt.copyErr") + ":"));
     m_cmbErrPolicy = new QComboBox;
-    m_cmbErrPolicy->addItems({
+    m_cmbErrPolicy->addItems(QStringList{
         TR("opt.err.ask"), TR("opt.err.cancel"), TR("opt.err.skip"),
         TR("opt.err.retryLog"), TR("opt.err.moveEnd")
     });
@@ -384,9 +384,9 @@ void MainWindow::BuildOptionsTab(QWidget* parent) {
     auto* grpPerf = new QGroupBox(TR("opt.perf"));
     auto* vPerf = new QVBoxLayout(grpPerf);
 
-    auto mkSpinRow = [&](QSpinBox*& sp, const char* key, int mn, int mx, int val) {
+    auto mkSpinRow = [&](QSpinBox*& sp, const QString& label, int mn, int mx, int val) {
         auto* row = new QHBoxLayout;
-        row->addWidget(new QLabel(TR(key)));
+        row->addWidget(new QLabel(label));
         sp = new QSpinBox;
         sp->setRange(mn, mx);
         sp->setValue(val);
@@ -397,8 +397,8 @@ void MainWindow::BuildOptionsTab(QWidget* parent) {
     };
 
     auto& cfg = ConfigManager::Instance().Config();
-    mkSpinRow(m_spThreads,  "opt.threads",  1, 64, (int)cfg.threadCount);
-    mkSpinRow(m_spBufferKB, "opt.bufferKB", 64, 65536, (int)cfg.bufferSizeKB);
+    mkSpinRow(m_spThreads,  TR("opt.threads"),  1, 64, (int)cfg.threadCount);
+    mkSpinRow(m_spBufferKB, TR("opt.bufferKB"), 64, 65536, (int)cfg.bufferSizeKB);
 
     m_chkNoBuffer = new QCheckBox(TR("opt.noBuffering"));
     m_chkOverlap  = new QCheckBox(TR("opt.overlapped"));
@@ -427,7 +427,7 @@ void MainWindow::BuildOptionsTab(QWidget* parent) {
     vMain->addWidget(grpLang);
 
     // Botón aplicar
-    m_btnApplyOpts = new QPushButton("✔ Aplicar y guardar opciones");
+    m_btnApplyOpts = new QPushButton(TR("opt.apply"));
     m_btnApplyOpts->setFixedWidth(200);
     connect(m_btnApplyOpts, &QPushButton::clicked, this, &MainWindow::OnApplyOptions);
     vMain->addWidget(m_btnApplyOpts);
@@ -729,7 +729,7 @@ void MainWindow::OnUIFileCompleted(const QString& path, bool success) {
 }
 
 void MainWindow::OnUIError(const QString& path, const QString& action,
-                           const QString& target, const QString& errText) {
+                           const QString& /*target*/, const QString& errText) {
     // Mostrar la pestaña de errores automáticamente
     if (m_panelVisible) m_tabs->setCurrentIndex(1);
 

@@ -1,22 +1,22 @@
 #pragma once
+#include <QString>
 #include <string>
 #include <map>
 #include <vector>
 
 namespace FileCopier {
 
-enum class Lang { ES, EN, FR, DE, PT };
+enum class Lang { ES, EN };
 
 class Language {
 public:
     static Language& Instance();
 
-    void   SetLanguage(Lang lang);
-    Lang   Current() const { return m_current; }
-    const  std::wstring& Get(const std::wstring& key) const;
+    void    SetLanguage(Lang lang);
+    Lang    Current() const { return m_current; }
+    QString Get(const QString& key) const;
 
-    // Lista de idiomas disponibles para la UI
-    static std::vector<std::pair<Lang, std::wstring>> Available();
+    static std::vector<std::pair<Lang, QString>> Available();
 
 private:
     Language();
@@ -24,12 +24,10 @@ private:
     void LoadEN();
 
     Lang m_current = Lang::ES;
-    std::map<std::wstring, std::wstring> m_strings;
-    std::wstring m_missing;
+    std::map<QString, QString> m_strings;
 };
 
-// Macro conveniente
-#define TR(key) FileCopier::Language::Instance().Get(L##key).c_str()
-#define TRW(key) FileCopier::Language::Instance().Get(L##key)
+// Macro: devuelve QString, compatible con todos los widgets Qt
+#define TR(key) FileCopier::Language::Instance().Get(QString(key))
 
 } // namespace FileCopier
