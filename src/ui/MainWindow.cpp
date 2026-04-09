@@ -416,7 +416,7 @@ void MainWindow::BuildOptionsTab(QWidget* parent) {
     auto* hLang = new QHBoxLayout(grpLang);
     m_cmbLanguage = new QComboBox;
     for (auto& [lang, name] : Language::Available())
-        m_cmbLanguage->addItem(QString::fromStdWString(name),
+        m_cmbLanguage->addItem(name,
                                static_cast<int>(lang));
     m_cmbLanguage->setCurrentIndex(
         static_cast<int>(Language::Instance().Current()));
