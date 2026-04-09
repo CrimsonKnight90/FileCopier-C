@@ -1,17 +1,12 @@
-// main.cpp
-// Qt con WIN32 subsystem maneja wWinMain internamente via libQt6EntryPoint.
-// Solo necesitamos definir main() normal — Qt lo envuelve en su propio wWinMain.
-
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#include <shellapi.h>
-
 #include "../include/Utils.h"
 #include "../include/EventBus.h"
 #include "../include/Language.h"
 #include "../include/ui/MainWindow.h"
+#include "../include/ui/TrayIcon.h"
 
 #include <QApplication>
 #include <QSettings>
@@ -27,31 +22,25 @@ int main(int argc, char* argv[])
     app.setOrganizationName("FileCopierDev");
     app.setStyle(QStyleFactory::create("Fusion"));
 
-    // Configuración
-    auto& cfg = ConfigManager::Instance();
-    if (!cfg.Load(L"filecopier.ini"))
-        cfg.Save(L"filecopier.ini");
+    // No cerrar la app cuando se cierra la ventana principal (vive en bandeja)
+    app.setQuitOnLastWindowClosed(false);
 
-    // Logger
+    auto& cfg = ConfigManager::Instance();
+    if (!cfg.Load(L"filecopier.ini")) cfg.Save(L"filecopier.ini");
+
     Logger::Instance().Init(cfg.Config().logPath);
     LOG_INFO(L"=== FileCopier started ===");
 
-    // Idioma
     Language::Instance().SetLanguage(Lang::ES);
 
-    // Ventana principal
     MainWindow window;
+    TrayIcon   tray(&window);
 
-    QSettings settings("FileCopierDev", "FileCopier");
-    if (settings.contains("geometry"))
-        window.restoreGeometry(settings.value("geometry").toByteArray());
-    else
-        window.resize(900, 580);
+    // El manejo de minimizar a bandeja se hace en MainWindow::changeEvent
 
     window.show();
     int ret = app.exec();
 
-    settings.setValue("geometry", window.saveGeometry());
     LOG_INFO(L"=== FileCopier exited ===");
     EventBus::Instance().ClearAll();
     return ret;

@@ -4,9 +4,9 @@
 #endif
 #include <windows.h>
 #include <QMainWindow>
+#include <QLabel>
 #include <QLineEdit>
 #include <QProgressBar>
-#include <QLabel>
 #include <QTabWidget>
 #include <QTreeWidget>
 #include <QPushButton>
@@ -16,6 +16,8 @@
 #include <QSpinBox>
 #include <QGroupBox>
 #include <QResizeEvent>
+#include <QEvent>
+#include <QTimer>
 #include <atomic>
 
 class MainWindow : public QMainWindow {
@@ -23,10 +25,12 @@ class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
+    void ShowOptionsTab();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
 signals:
     void requestCancel();
@@ -43,6 +47,7 @@ public slots:
 private slots:
     void OnBrowseSrc();
     void OnBrowseDst();
+    void OnSrcDstChanged();
     void OnStart();
     void OnPause();
     void OnCancel();
@@ -60,6 +65,7 @@ private slots:
     void OnSaveErrors();
     void OnLanguageChanged(int index);
     void OnApplyOptions();
+    void OnDefaultOptions();
 
 private:
     void BuildUI();
@@ -70,6 +76,7 @@ private:
     void RetranslateUI();
     void SaveSettings();
     void LoadSettings();
+    void AddPathToList(const QString& path);
 
     QString FormatSize(qint64 bytes) const;
     QString FormatETA(double secs) const;
@@ -82,6 +89,9 @@ private:
     bool          m_panelVisible  = false;
 
     // Controles superiores
+    QLabel*       m_lblSrc        = nullptr;
+    QLabel*       m_lblDst        = nullptr;
+    QLabel*       m_lblSpeedKey   = nullptr;
     QLineEdit*    m_srcEdit       = nullptr;
     QLineEdit*    m_dstEdit       = nullptr;
     QProgressBar* m_globalBar     = nullptr;
@@ -108,7 +118,12 @@ private:
     QPushButton*  m_btnClearErr   = nullptr;
     QPushButton*  m_btnSaveErr    = nullptr;
 
-    // Tab opciones
+    // Tab opciones — guardamos punteros a grupos para RetranslateUI
+    QGroupBox*    m_grpEnd        = nullptr;
+    QGroupBox*    m_grpCol        = nullptr;
+    QGroupBox*    m_grpErr        = nullptr;
+    QGroupBox*    m_grpPerf       = nullptr;
+    QGroupBox*    m_grpLang       = nullptr;
     QRadioButton* m_rbNoCloseErr  = nullptr;
     QRadioButton* m_rbNoClose     = nullptr;
     QRadioButton* m_rbClose       = nullptr;
@@ -121,6 +136,7 @@ private:
     QCheckBox*    m_chkVerify     = nullptr;
     QComboBox*    m_cmbLanguage   = nullptr;
     QPushButton*  m_btnApplyOpts  = nullptr;
+    QPushButton*  m_btnDefaultOpts= nullptr;
 
     // Estado
     std::atomic<bool> m_copying  {false};

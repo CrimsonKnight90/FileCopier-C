@@ -93,6 +93,7 @@ void Language::LoadES() {
         { "opt.verify",         "Verificar archivos tras copiar" },
         { "opt.language",       "Idioma / Language" },
         { "opt.apply",          "Aplicar y guardar opciones" },
+        { "opt.default",        "Por defecto" },
         { "msg.selectFolders",  "Selecciona carpeta origen y destino." },
         { "msg.done",           "Completado: %1 ok, %2 errores de %3 total" },
         { "msg.cancelled",      "Cancelado por el usuario" },
@@ -103,6 +104,11 @@ void Language::LoadES() {
         { "ctx.selectAll",      "Seleccionar todos" },
         { "ctx.invertSel",      "Invertir selecci\u00f3n" },
         { "ctx.sort",           "Ordenar" },
+        { "tray.newTask",       "Nueva tarea" },
+        { "tray.newCopy",       "Nueva copia" },
+        { "tray.newMove",       "Nuevo desplazamiento" },
+        { "tray.config",        "Configuraci\u00f3n" },
+        { "tray.quit",          "Salir" },
     };
 }
 
@@ -168,6 +174,7 @@ void Language::LoadEN() {
         { "opt.verify",         "Verify files after copy" },
         { "opt.language",       "Language / Idioma" },
         { "opt.apply",          "Apply and save options" },
+        { "opt.default",        "Defaults" },
         { "msg.selectFolders",  "Please select source and destination folders." },
         { "msg.done",           "Done: %1 ok, %2 failed of %3 total" },
         { "msg.cancelled",      "Cancelled by user" },
@@ -178,6 +185,11 @@ void Language::LoadEN() {
         { "ctx.selectAll",      "Select All" },
         { "ctx.invertSel",      "Invert Selection" },
         { "ctx.sort",           "Sort" },
+        { "tray.newTask",       "New Task" },
+        { "tray.newCopy",       "New Copy" },
+        { "tray.newMove",       "New Move" },
+        { "tray.config",        "Configuration" },
+        { "tray.quit",          "Quit" },
     };
 }
 

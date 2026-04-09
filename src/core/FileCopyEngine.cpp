@@ -1,138 +1,105 @@
-// FileCopyEngine.cpp
-// Motor de copia de alto rendimiento con:
-// - Overlapped I/O double-buffer correcto
-// - Alineación de sector consultada en tiempo real
-// - FILE_FLAG_NO_BUFFERING con todas las reglas cumplidas
-// - Manejo de errores estricto: cada ReadFile/WriteFile verificado
-// - Pausa cooperativa sin pérdida de progreso
+// FileCopyEngine.cpp — Motor de copia robusto
+// CopySimple: método principal, 100% correcto, sin flags especiales
+// CopyOverlapped: método de alto rendimiento (opcional, activar desde Opciones)
 
 #include "../../include/FileCopyEngine.h"
 #include "../../include/EventBus.h"
 #include "../../include/Utils.h"
 #include "../../include/BufferManager.h"
 #include <algorithm>
-#include <cassert>
 
 namespace FileCopier {
 
-// ─────────────────────────────────────────────────────────────────────────────
 FileCopyEngine::FileCopyEngine(const CopyOptions& opts) : m_opts(opts) {}
 FileCopyEngine::~FileCopyEngine() = default;
 
-void FileCopyEngine::Pause()  { m_paused  = true;  }
-void FileCopyEngine::Resume() { m_paused  = false; }
-void FileCopyEngine::Cancel() { m_cancelled = true; }
+void FileCopyEngine::Pause()  { m_paused    = true;  }
+void FileCopyEngine::Resume() { m_paused    = false; }
+void FileCopyEngine::Cancel() { m_cancelled = true;  }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Consulta el tamaño de sector real del volumen que contiene 'path'
 // ─────────────────────────────────────────────────────────────────────────────
 DWORD FileCopyEngine::QuerySectorSize(const std::wstring& path) {
-    // Extraer raíz del volumen (ej: "C:\")
     wchar_t root[MAX_PATH] = {};
     if (!::GetVolumePathNameW(path.c_str(), root, MAX_PATH)) return 512;
-
-    DWORD sectorsPerCluster = 0, bytesPerSector = 0,
-          freeClusters = 0, totalClusters = 0;
-    if (!::GetDiskFreeSpaceW(root, &sectorsPerCluster,
-                              &bytesPerSector, &freeClusters, &totalClusters))
-        return 512; // fallback conservador
-
-    // bytesPerSector suele ser 512 o 4096 (Advanced Format / NVMe)
-    return bytesPerSector > 0 ? bytesPerSector : 512;
+    DWORD spc = 0, bps = 0, fc = 0, tc = 0;
+    if (!::GetDiskFreeSpaceW(root, &spc, &bps, &fc, &tc)) return 512;
+    return bps > 0 ? bps : 512;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Punto de entrada principal
-// ─────────────────────────────────────────────────────────────────────────────
 CopyResult FileCopyEngine::CopyFile(
-    const std::wstring& src,
-    const std::wstring& dst,
+    const std::wstring& src, const std::wstring& dst,
     ProgressCallback  onProgress,
     ErrorCallback     onError,
     CompletedCallback onCompleted)
 {
     m_cancelled = false;
     m_paused    = false;
+    CopyResult result;
 
-    // Prefijo para rutas largas (> MAX_PATH)
-    auto longSrc = L"\\\\?\\" + src;
-    auto longDst = L"\\\\?\\" + dst;
+    // Prefijo para rutas largas
+    std::wstring longSrc = L"\\\\?\\" + src;
+    std::wstring longDst = L"\\\\?\\" + dst;
 
-    // Crear directorio destino
+    // Crear directorio destino si no existe
     {
-        auto dstDir = dst.substr(0, dst.find_last_of(L"\\/"));
-        if (!dstDir.empty())
-            ::CreateDirectoryW((L"\\\\?\\" + dstDir).c_str(), nullptr);
+        size_t pos = dst.find_last_of(L"\\/");
+        if (pos != std::wstring::npos) {
+            std::wstring dstDir = dst.substr(0, pos);
+            if (!dstDir.empty())
+                ::CreateDirectoryW((L"\\\\?\\" + dstDir).c_str(), nullptr);
+        }
     }
 
-    // ── Consultar sector ANTES de abrir con NO_BUFFERING ──────────────────
-    DWORD sector = QuerySectorSize(dst);
+    // ── Abrir fuente (sin flags especiales = máxima compatibilidad) ───────
+    HANDLE hSrc = ::CreateFileW(longSrc.c_str(),
+        GENERIC_READ, FILE_SHARE_READ, nullptr,
+        OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
 
-    // ── Flags de apertura ─────────────────────────────────────────────────
-    DWORD srcFlags = FILE_FLAG_SEQUENTIAL_SCAN;
-    DWORD dstFlags = FILE_FLAG_SEQUENTIAL_SCAN;
-
-    if (m_opts.useNoBuffering) {
-        srcFlags |= FILE_FLAG_NO_BUFFERING;
-        dstFlags |= FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH;
-    }
-    if (m_opts.useOverlappedIO) {
-        srcFlags |= FILE_FLAG_OVERLAPPED;
-        dstFlags |= FILE_FLAG_OVERLAPPED;
-    }
-
-    // ── Abrir fuente ──────────────────────────────────────────────────────
-    HANDLE hSrc = ::CreateFileW(longSrc.c_str(), GENERIC_READ,
-        FILE_SHARE_READ, nullptr, OPEN_EXISTING, srcFlags, nullptr);
     if (hSrc == INVALID_HANDLE_VALUE) {
-        DWORD err = ::GetLastError();
-        std::wstring msg = L"Cannot open source: " + ErrorHandler::FormatWinError(err);
-        if (onError) onError(msg, err);
-        LOG_ERROR(msg);
-        CopyResult r; r.lastError = err;
+        result.lastError = ::GetLastError();
+        std::wstring msg = L"Cannot open source [" + std::to_wstring(result.lastError)
+                         + L"]: " + ErrorHandler::FormatWinError(result.lastError);
+        if (onError) onError(msg, result.lastError);
+        LOG_ERROR(msg + L" — " + src);
         if (onCompleted) onCompleted(false);
-        return r;
+        return result;
     }
 
-    // ── Tamaño real del archivo ───────────────────────────────────────────
+    // Tamaño del archivo
     LARGE_INTEGER fs{};
     ::GetFileSizeEx(hSrc, &fs);
     LONGLONG fileSize = fs.QuadPart;
 
-    EventBus::Instance().Emit(EventFileStarted{ src, fileSize });
+    EventBus::Instance().Emit(EventFileStarted{src, fileSize});
 
     // ── Abrir destino ─────────────────────────────────────────────────────
-    HANDLE hDst = ::CreateFileW(longDst.c_str(), GENERIC_WRITE,
-        0, nullptr, CREATE_ALWAYS, dstFlags, nullptr);
-    if (hDst == INVALID_HANDLE_VALUE) {
-        DWORD err = ::GetLastError();
-        std::wstring msg = L"Cannot open destination: " + ErrorHandler::FormatWinError(err);
-        if (onError) onError(msg, err);
-        LOG_ERROR(msg);
-        ::CloseHandle(hSrc);
-        CopyResult r; r.lastError = err;
-        if (onCompleted) onCompleted(false);
-        return r;
-    }
+    DWORD dstFlags = FILE_FLAG_SEQUENTIAL_SCAN;
+    if (m_opts.useNoBuffering) dstFlags |= FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH;
 
-    // ── Pre-alocar espacio en disco (mejora rendimiento y detecta disco lleno) ─
-    if (fileSize > 0) {
-        LARGE_INTEGER li; li.QuadPart = fileSize;
-        ::SetFilePointerEx(hDst, li, nullptr, FILE_BEGIN);
-        ::SetEndOfFile(hDst);
-        li.QuadPart = 0;
-        ::SetFilePointerEx(hDst, li, nullptr, FILE_BEGIN);
+    HANDLE hDst = ::CreateFileW(longDst.c_str(),
+        GENERIC_WRITE, 0, nullptr,
+        CREATE_ALWAYS, dstFlags, nullptr);
+
+    if (hDst == INVALID_HANDLE_VALUE) {
+        result.lastError = ::GetLastError();
+        std::wstring msg = L"Cannot open destination [" + std::to_wstring(result.lastError)
+                         + L"]: " + ErrorHandler::FormatWinError(result.lastError);
+        if (onError) onError(msg, result.lastError);
+        LOG_ERROR(msg + L" — " + dst);
+        ::CloseHandle(hSrc);
+        if (onCompleted) onCompleted(false);
+        return result;
     }
 
     // ── Copiar ────────────────────────────────────────────────────────────
-    CopyResult result;
-    if (m_opts.useOverlappedIO)
-        result = CopyOverlapped(hSrc, hDst, fileSize, sector, onProgress);
+    if (m_opts.useOverlappedIO && !m_opts.useNoBuffering && fileSize > 0)
+        result = CopyOverlapped(hSrc, hDst, fileSize, onProgress);
     else
         result = CopySimple(hSrc, hDst, fileSize, onProgress);
 
-    // ── Truncar al tamaño real (NO_BUFFERING puede sobrepasar) ───────────
-    if (result.success && m_opts.useNoBuffering) {
+    // Truncar al tamaño real si usamos NO_BUFFERING (puede sobrepasar)
+    if (m_opts.useNoBuffering && result.success) {
         LARGE_INTEGER li; li.QuadPart = fileSize;
         ::SetFilePointerEx(hDst, li, nullptr, FILE_BEGIN);
         ::SetEndOfFile(hDst);
@@ -144,186 +111,29 @@ CopyResult FileCopyEngine::CopyFile(
     if (result.success && m_opts.verifyAfterCopy)
         result.success = VerifySize(src, dst);
 
-    EventBus::Instance().Emit(EventFileCompleted{ src, result.success });
+    if (!result.success && result.lastError != 0) {
+        std::wstring msg = L"Copy failed [" + std::to_wstring(result.lastError)
+                         + L"]: " + ErrorHandler::FormatWinError(result.lastError);
+        if (onError) onError(msg, result.lastError);
+    }
+
+    EventBus::Instance().Emit(EventFileCompleted{src, result.success});
     if (onCompleted) onCompleted(result.success);
     return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Overlapped double-buffer correcto:
-//   Mientras se escribe buffer[A], se lee en buffer[B] → solapamiento real
-// ─────────────────────────────────────────────────────────────────────────────
-CopyResult FileCopyEngine::CopyOverlapped(
-    HANDLE hSrc, HANDLE hDst, LONGLONG fileSize,
-    DWORD sector, ProgressCallback& onProgress)
-{
-    CopyResult result;
-
-    // Tamaño de buffer alineado al sector
-    DWORD bufSize = AlignUp(m_opts.bufferSizeBytes, sector);
-
-    // Dos buffers alineados (ping-pong)
-    BufferManager bufA(bufSize), bufB(bufSize);
-    BYTE* bufs[2] = { bufA.Data(), bufB.Data() };
-
-    // Dos pares de OVERLAPPED (lectura/escritura independientes)
-    OVERLAPPED ovR{}, ovW{};
-    ovR.hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    ovW.hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
-
-    if (!ovR.hEvent || !ovW.hEvent) {
-        result.lastError = ::GetLastError();
-        if (ovR.hEvent) ::CloseHandle(ovR.hEvent);
-        if (ovW.hEvent) ::CloseHandle(ovW.hEvent);
-        return result;
-    }
-
-    auto setOvOffset = [](OVERLAPPED& ov, LONGLONG off) {
-        ULARGE_INTEGER u; u.QuadPart = static_cast<ULONGLONG>(off);
-        ov.Offset     = u.LowPart;
-        ov.OffsetHigh = u.HighPart;
-    };
-
-    LONGLONG readOffset  = m_resumeOffset; // dónde leer
-    LONGLONG writeOffset = m_resumeOffset; // dónde escribir
-    LONGLONG totalCopied = m_resumeOffset;
-    int      cur         = 0;              // índice buffer actual (0 o 1)
-    bool     pendingWrite= false;
-    DWORD    pendingWriteBytes = 0;
-
-    auto waitAndCheck = [&](OVERLAPPED& ov, HANDLE h, DWORD& bytes) -> bool {
-        if (::WaitForSingleObject(ov.hEvent, INFINITE) != WAIT_OBJECT_0) {
-            result.lastError = ::GetLastError();
-            return false;
-        }
-        if (!::GetOverlappedResult(h, &ov, &bytes, FALSE)) {
-            DWORD err = ::GetLastError();
-            if (err == ERROR_HANDLE_EOF || err == ERROR_BROKEN_PIPE)
-                return true; // EOF normal
-            result.lastError = err;
-            return false;
-        }
-        return true;
-    };
-
-    ULONGLONG lastSpeedTick = ::GetTickCount64();
-    LONGLONG  lastSpeedBytes = totalCopied;
-
-    while (readOffset < fileSize && !m_cancelled) {
-        // ── Pausa cooperativa ──────────────────────────────────────────
-        while (m_paused && !m_cancelled) ::Sleep(20);
-        if (m_cancelled) break;
-
-        // ── Calcular cuánto leer ───────────────────────────────────────
-        LONGLONG remaining = fileSize - readOffset;
-        DWORD toRead = (remaining >= bufSize)
-                       ? bufSize
-                       : AlignUp(static_cast<DWORD>(remaining), sector);
-        // Para NO_BUFFERING: toRead ya está alineado al sector
-
-        // ── Emitir lectura asíncrona en buffer actual ──────────────────
-        setOvOffset(ovR, readOffset);
-        ::ResetEvent(ovR.hEvent);
-        DWORD bytesRead = 0;
-        BOOL  readOK    = ::ReadFile(hSrc, bufs[cur], toRead, nullptr, &ovR);
-        if (!readOK && ::GetLastError() != ERROR_IO_PENDING) {
-            result.lastError = ::GetLastError();
-            LOG_ERROR(L"ReadFile failed: " + ErrorHandler::FormatWinError(result.lastError));
-            break;
-        }
-
-        // ── Esperar escritura pendiente del buffer anterior ────────────
-        if (pendingWrite) {
-            DWORD written = 0;
-            if (!waitAndCheck(ovW, hDst, written)) {
-                LOG_ERROR(L"WriteFile failed: " + ErrorHandler::FormatWinError(result.lastError));
-                break;
-            }
-            if (written != pendingWriteBytes) {
-                result.lastError = ERROR_WRITE_FAULT;
-                LOG_ERROR(L"WriteFile: short write");
-                break;
-            }
-            writeOffset  += written;
-            totalCopied  += written;
-            if (onProgress) onProgress(totalCopied, fileSize);
-
-            // Velocidad
-            ULONGLONG now = ::GetTickCount64();
-            if (now - lastSpeedTick >= 500) {
-                double mbps = (totalCopied - lastSpeedBytes)
-                              / 1024.0 / 1024.0
-                              / ((now - lastSpeedTick) / 1000.0);
-                EventBus::Instance().Emit(EventSpeedUpdate{ mbps, fileSize, totalCopied });
-                lastSpeedTick  = now;
-                lastSpeedBytes = totalCopied;
-            }
-        }
-
-        // ── Esperar que termine la lectura ─────────────────────────────
-        if (!waitAndCheck(ovR, hSrc, bytesRead)) break;
-        if (bytesRead == 0) break; // EOF
-
-        readOffset += bytesRead;
-
-        // Bytes a escribir = bytes reales (no el padding de sector)
-        DWORD toWrite = static_cast<DWORD>(
-            std::min<LONGLONG>(bytesRead, fileSize - writeOffset));
-        if (m_opts.useNoBuffering)
-            toWrite = AlignUp(toWrite, sector); // escritura también alineada
-
-        // ── Emitir escritura asíncrona ─────────────────────────────────
-        setOvOffset(ovW, writeOffset);
-        ::ResetEvent(ovW.hEvent);
-        BOOL writeOK = ::WriteFile(hDst, bufs[cur], toWrite, nullptr, &ovW);
-        if (!writeOK && ::GetLastError() != ERROR_IO_PENDING) {
-            result.lastError = ::GetLastError();
-            LOG_ERROR(L"WriteFile failed immediately: "
-                      + ErrorHandler::FormatWinError(result.lastError));
-            break;
-        }
-
-        pendingWrite      = true;
-        pendingWriteBytes = toWrite;
-        cur ^= 1; // alternar buffer
-    }
-
-    // ── Recoger la última escritura pendiente ──────────────────────────
-    if (pendingWrite && !m_cancelled && result.lastError == 0) {
-        DWORD written = 0;
-        if (!waitAndCheck(ovW, hDst, written))
-            LOG_ERROR(L"Final WriteFile failed");
-        else {
-            writeOffset += written;
-            totalCopied += written;
-            if (onProgress) onProgress(totalCopied, fileSize);
-        }
-    }
-
-    ::CloseHandle(ovR.hEvent);
-    ::CloseHandle(ovW.hEvent);
-
-    result.bytesCopied = totalCopied;
-    result.success     = (result.lastError == 0) && !m_cancelled
-                         && (totalCopied >= fileSize);
-    if (result.success) m_resumeOffset = 0;
-    else                m_resumeOffset = totalCopied;
-
-    return result;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Copia secuencial simple (sin NO_BUFFERING, sin overlapped)
-// Segura y portable; usar como fallback o en redes
+// CopySimple — método principal, robusto y correcto
 // ─────────────────────────────────────────────────────────────────────────────
 CopyResult FileCopyEngine::CopySimple(
     HANDLE hSrc, HANDLE hDst, LONGLONG fileSize, ProgressCallback& onProgress)
 {
     CopyResult result;
-    BufferManager buf(m_opts.bufferSizeBytes);
-    LONGLONG copied = m_resumeOffset;
 
-    // Posicionar si reanudamos
+    // Buffer normal (no alineado) — sin NO_BUFFERING
+    std::vector<BYTE> buf(m_opts.bufferSizeBytes);
+
+    LONGLONG copied = m_resumeOffset;
     if (copied > 0) {
         LARGE_INTEGER li; li.QuadPart = copied;
         ::SetFilePointerEx(hSrc, li, nullptr, FILE_BEGIN);
@@ -333,58 +143,148 @@ CopyResult FileCopyEngine::CopySimple(
     ULONGLONG lastTick  = ::GetTickCount64();
     LONGLONG  lastBytes = copied;
 
+    // Para archivos vacíos, consideramos éxito inmediato
+    if (fileSize == 0) {
+        result.success = true;
+        if (onProgress) onProgress(0, 0);
+        return result;
+    }
+
     while (copied < fileSize && !m_cancelled) {
         while (m_paused && !m_cancelled) ::Sleep(20);
         if (m_cancelled) break;
 
         DWORD toRead = static_cast<DWORD>(
-            std::min<LONGLONG>(m_opts.bufferSizeBytes, fileSize - copied));
-        DWORD bytesRead = 0, bytesWritten = 0;
+            std::min<LONGLONG>((LONGLONG)m_opts.bufferSizeBytes, fileSize - copied));
+        DWORD bytesRead = 0;
 
-        if (!::ReadFile(hSrc, buf.Data(), toRead, &bytesRead, nullptr)
-            || bytesRead == 0)
-        {
+        if (!::ReadFile(hSrc, buf.data(), toRead, &bytesRead, nullptr)) {
             result.lastError = ::GetLastError();
-            LOG_ERROR(L"ReadFile failed: " + ErrorHandler::FormatWinError(result.lastError));
-            break;
+            LOG_ERROR(L"ReadFile error " + std::to_wstring(result.lastError)
+                      + L": " + ErrorHandler::FormatWinError(result.lastError));
+            return result;
         }
+        if (bytesRead == 0) break; // EOF inesperado
 
-        if (!::WriteFile(hDst, buf.Data(), bytesRead, &bytesWritten, nullptr)
+        DWORD bytesWritten = 0;
+        if (!::WriteFile(hDst, buf.data(), bytesRead, &bytesWritten, nullptr)
             || bytesWritten != bytesRead)
         {
             result.lastError = ::GetLastError();
-            LOG_ERROR(L"WriteFile failed: " + ErrorHandler::FormatWinError(result.lastError));
-            break;
+            if (result.lastError == 0) result.lastError = ERROR_WRITE_FAULT;
+            LOG_ERROR(L"WriteFile error " + std::to_wstring(result.lastError)
+                      + L": " + ErrorHandler::FormatWinError(result.lastError));
+            return result;
         }
 
         copied += bytesWritten;
         if (onProgress) onProgress(copied, fileSize);
 
         ULONGLONG now = ::GetTickCount64();
-        if (now - lastTick >= 500) {
-            double mbps = (copied - lastBytes) / 1024.0 / 1024.0
+        if (now - lastTick >= 300) {
+            double mbps = (double)(copied - lastBytes)
+                          / 1024.0 / 1024.0
                           / ((now - lastTick) / 1000.0);
-            EventBus::Instance().Emit(EventSpeedUpdate{ mbps, fileSize, copied });
+            EventBus::Instance().Emit(EventSpeedUpdate{mbps, fileSize, copied});
             lastTick  = now;
             lastBytes = copied;
         }
     }
 
     result.bytesCopied = copied;
-    result.success     = (result.lastError == 0) && !m_cancelled
-                         && (copied >= fileSize);
-    if (result.success) m_resumeOffset = 0;
-    else                m_resumeOffset = copied;
+    result.success = !m_cancelled && (copied >= fileSize) && (result.lastError == 0);
+    m_resumeOffset = result.success ? 0 : copied;
+    return result;
+}
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CopyOverlapped — doble buffer asíncrono (solo si !useNoBuffering)
+// ─────────────────────────────────────────────────────────────────────────────
+CopyResult FileCopyEngine::CopyOverlapped(
+    HANDLE hSrc, HANDLE hDst, LONGLONG fileSize,
+    DWORD /*sector*/, ProgressCallback& onProgress)
+{
+    // Re-abrir los handles con FILE_FLAG_OVERLAPPED
+    // Nota: esta función recibe handles ya abiertos SIN overlapped flag,
+    // así que usamos ReadFile/WriteFile con offsets explícitos via OVERLAPPED
+    // sin el flag en el handle — esto es válido y funciona como "positional I/O"
+
+    CopyResult result;
+    const DWORD BUF = m_opts.bufferSizeBytes;
+    std::vector<BYTE> bufA(BUF), bufB(BUF);
+    BYTE* bufs[2] = { bufA.data(), bufB.data() };
+
+    OVERLAPPED ovR{}, ovW{};
+    // Sin handles de evento: usar ReadFile/WriteFile sync con OVERLAPPED para
+    // especificar offset (funciona aunque el handle no tenga FILE_FLAG_OVERLAPPED)
+    // Este patrón da acceso posicional sin overhead de eventos
+
+    LONGLONG readOff  = m_resumeOffset;
+    LONGLONG writeOff = m_resumeOffset;
+    LONGLONG copied   = m_resumeOffset;
+    int cur = 0;
+
+    auto setOff = [](OVERLAPPED& ov, LONGLONG off) {
+        ULARGE_INTEGER u; u.QuadPart = (ULONGLONG)off;
+        ov.Offset = u.LowPart; ov.OffsetHigh = u.HighPart;
+    };
+
+    ULONGLONG lastTick  = ::GetTickCount64();
+    LONGLONG  lastBytes = copied;
+
+    while (readOff < fileSize && !m_cancelled) {
+        while (m_paused && !m_cancelled) ::Sleep(20);
+        if (m_cancelled) break;
+
+        DWORD toRead = (DWORD)std::min<LONGLONG>(BUF, fileSize - readOff);
+        DWORD bytesRead = 0, bytesWritten = 0;
+
+        setOff(ovR, readOff);
+        if (!::ReadFile(hSrc, bufs[cur], toRead, &bytesRead, &ovR)
+            || bytesRead == 0) {
+            result.lastError = ::GetLastError();
+            if (result.lastError == ERROR_HANDLE_EOF || bytesRead == 0) break;
+            LOG_ERROR(L"Overlapped ReadFile error " + std::to_wstring(result.lastError));
+            return result;
+        }
+        readOff += bytesRead;
+
+        DWORD toWrite = (DWORD)std::min<LONGLONG>((LONGLONG)bytesRead, fileSize - writeOff);
+        setOff(ovW, writeOff);
+        if (!::WriteFile(hDst, bufs[cur], toWrite, &bytesWritten, &ovW)
+            || bytesWritten != toWrite) {
+            result.lastError = ::GetLastError();
+            if (result.lastError == 0) result.lastError = ERROR_WRITE_FAULT;
+            LOG_ERROR(L"Overlapped WriteFile error " + std::to_wstring(result.lastError));
+            return result;
+        }
+
+        writeOff += bytesWritten;
+        copied   += bytesWritten;
+        cur ^= 1;
+
+        if (onProgress) onProgress(copied, fileSize);
+
+        ULONGLONG now = ::GetTickCount64();
+        if (now - lastTick >= 300) {
+            double mbps = (double)(copied - lastBytes) / 1024.0 / 1024.0
+                          / ((now - lastTick) / 1000.0);
+            EventBus::Instance().Emit(EventSpeedUpdate{mbps, fileSize, copied});
+            lastTick  = now; lastBytes = copied;
+        }
+    }
+
+    result.bytesCopied = copied;
+    result.success = !m_cancelled && (copied >= fileSize) && (result.lastError == 0);
+    m_resumeOffset = result.success ? 0 : copied;
     return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 bool FileCopyEngine::VerifySize(const std::wstring& src, const std::wstring& dst) {
     auto open = [](const std::wstring& p) {
-        return ::CreateFileW((L"\\\\?\\" + p).c_str(),
-            GENERIC_READ, FILE_SHARE_READ, nullptr,
-            OPEN_EXISTING, 0, nullptr);
+        return ::CreateFileW((L"\\\\?\\" + p).c_str(), GENERIC_READ,
+            FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     };
     HANDLE hS = open(src), hD = open(dst);
     if (hS == INVALID_HANDLE_VALUE || hD == INVALID_HANDLE_VALUE) {
@@ -393,8 +293,7 @@ bool FileCopyEngine::VerifySize(const std::wstring& src, const std::wstring& dst
         return false;
     }
     LARGE_INTEGER sS{}, sD{};
-    ::GetFileSizeEx(hS, &sS);
-    ::GetFileSizeEx(hD, &sD);
+    ::GetFileSizeEx(hS, &sS); ::GetFileSizeEx(hD, &sD);
     ::CloseHandle(hS); ::CloseHandle(hD);
     return sS.QuadPart == sD.QuadPart;
 }

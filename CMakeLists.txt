@@ -57,6 +57,7 @@ set(SOURCES
     src/ui/ProgressPanel.cpp
     src/ui/ErrorDialog.cpp
     src/ui/ErrorLog.cpp
+    src/ui/TrayIcon.cpp
 
     # Utils
     src/utils/Logger.cpp
@@ -79,6 +80,7 @@ set(HEADERS
     include/ui/ProgressPanel.h
     include/ui/ErrorDialog.h
     include/ui/ErrorLog.h
+    include/ui/TrayIcon.h
 )
 
 # ── Ejecutable ───────────────────────────────────────────────────────────────
