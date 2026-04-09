@@ -33,11 +33,22 @@ void DirectoryScanner::ScanDirectory(
 {
     if (m_cancelled) return;
 
+    // Remover prefijo \\?\ si existe para evitar duplicación
+    auto cleanPath = [](const std::wstring& p) -> std::wstring {
+        if (p.size() >= 4 && p.substr(0, 4) == L"\\\\?\\") {
+            return p.substr(4);
+        }
+        return p;
+    };
+
+    std::wstring cleanSrc = cleanPath(srcDir);
+    std::wstring cleanDst = cleanPath(dstDir);
+
     WIN32_FIND_DATAW fd{};
-    std::wstring pattern = L"\\\\?\\" + srcDir + L"\\*";
+    std::wstring pattern = L"\\\\?\\" + cleanSrc + L"\\*";
     HANDLE hFind = ::FindFirstFileW(pattern.c_str(), &fd);
     if (hFind == INVALID_HANDLE_VALUE) {
-        LOG_WARNING(L"Cannot open directory: " + srcDir);
+        LOG_WARNING(L"Cannot open directory: " + cleanSrc);
         return;
     }
 
@@ -47,8 +58,8 @@ void DirectoryScanner::ScanDirectory(
         std::wstring name = fd.cFileName;
         if (name == L"." || name == L"..") continue;
 
-        std::wstring srcPath = srcDir + L"\\" + name;
-        std::wstring dstPath = dstDir + L"\\" + name;
+        std::wstring srcPath = cleanSrc + L"\\" + name;
+        std::wstring dstPath = cleanDst + L"\\" + name;
 
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             // Registrar el propio directorio (para crearlo en destino)
