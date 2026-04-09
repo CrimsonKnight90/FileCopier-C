@@ -40,8 +40,8 @@ struct AppConfig {
     DWORD   retryDelayMs   = 500;
     bool    verifyAfterCopy= false;
     bool    skipOnError    = true;
-    bool    useNoBuffering = true;
-    bool    useOverlapped  = true;
+    bool    useNoBuffering = false;  // DEBE ser false; true requiere alineación estricta
+    bool    useOverlapped  = true;   // overlapped I/O sí es seguro
     std::wstring logPath   = L"filecopier.log";
     std::wstring statePath = L"filecopier_state.json";
 };

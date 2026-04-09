@@ -100,6 +100,9 @@ void Language::LoadES() {
         { "status.scanning",    "Escaneando archivos..." },
         { "status.ready",       "Listo" },
         { "status.optSaved",    "Opciones guardadas." },
+        { "ctx.selectAll",      "Seleccionar todos" },
+        { "ctx.invertSel",      "Invertir selecci\u00f3n" },
+        { "ctx.sort",           "Ordenar" },
     };
 }
 
@@ -172,6 +175,9 @@ void Language::LoadEN() {
         { "status.scanning",    "Scanning files..." },
         { "status.ready",       "Ready" },
         { "status.optSaved",    "Options saved." },
+        { "ctx.selectAll",      "Select All" },
+        { "ctx.invertSel",      "Invert Selection" },
+        { "ctx.sort",           "Sort" },
     };
 }
 

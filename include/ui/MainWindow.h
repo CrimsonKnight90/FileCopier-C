@@ -15,6 +15,7 @@
 #include <QCheckBox>
 #include <QSpinBox>
 #include <QGroupBox>
+#include <QResizeEvent>
 #include <atomic>
 
 class MainWindow : public QMainWindow {
@@ -25,12 +26,12 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
 signals:
     void requestCancel();
 
 public slots:
-    // Actualizaciones desde hilos de copia (via QueuedConnection)
     void OnUIFileStarted(const QString& path, qint64 total);
     void OnUIProgress(const QString& path, qint64 done, qint64 total);
     void OnUIFileCompleted(const QString& path, bool success);
@@ -46,6 +47,7 @@ private slots:
     void OnPause();
     void OnCancel();
     void OnTogglePanel();
+    void OnCopyListContextMenu(const QPoint& pos);
     void OnAddFiles();
     void OnRemoveSelected();
     void OnMoveToTop();
@@ -66,20 +68,20 @@ private:
     void BuildOptionsTab(QWidget* parent);
     void ConnectEventBus();
     void RetranslateUI();
-    void ApplyMinSize();
+    void SaveSettings();
+    void LoadSettings();
 
     QString FormatSize(qint64 bytes) const;
     QString FormatETA(double secs) const;
     QString FormatSpeed(double mbps) const;
 
-    // ── Layout principal ──────────────────────────────────────────────────
-    QWidget*      m_topBar        = nullptr; // fila source/dest/progress
-    QWidget*      m_panelWidget   = nullptr; // sección colapsable (tabs)
+    // Layout
+    QWidget*      m_panelWidget   = nullptr;
     QTabWidget*   m_tabs          = nullptr;
     QPushButton*  m_toggleBtn     = nullptr;
     bool          m_panelVisible  = false;
 
-    // Controles superior
+    // Controles superiores
     QLineEdit*    m_srcEdit       = nullptr;
     QLineEdit*    m_dstEdit       = nullptr;
     QProgressBar* m_globalBar     = nullptr;
@@ -90,7 +92,7 @@ private:
     QPushButton*  m_btnPause      = nullptr;
     QPushButton*  m_btnCancel     = nullptr;
 
-    // ── Tab 1: Lista de Copia ─────────────────────────────────────────────
+    // Tab lista de copia
     QTreeWidget*  m_copyList      = nullptr;
     QPushButton*  m_btnToTop      = nullptr;
     QPushButton*  m_btnUp         = nullptr;
@@ -101,40 +103,31 @@ private:
     QPushButton*  m_btnSaveList   = nullptr;
     QPushButton*  m_btnLoadList   = nullptr;
 
-    // ── Tab 2: Informe de errores ─────────────────────────────────────────
+    // Tab errores
     QTreeWidget*  m_errorList     = nullptr;
     QPushButton*  m_btnClearErr   = nullptr;
     QPushButton*  m_btnSaveErr    = nullptr;
 
-    // ── Tab 3: Opciones ───────────────────────────────────────────────────
-    // Fin de copia
+    // Tab opciones
     QRadioButton* m_rbNoCloseErr  = nullptr;
     QRadioButton* m_rbNoClose     = nullptr;
     QRadioButton* m_rbClose       = nullptr;
-    // Colisiones
     QComboBox*    m_cmbCollision  = nullptr;
-    // Errores de copia
     QComboBox*    m_cmbErrPolicy  = nullptr;
-    // Performance
     QSpinBox*     m_spThreads     = nullptr;
     QSpinBox*     m_spBufferKB    = nullptr;
     QCheckBox*    m_chkNoBuffer   = nullptr;
     QCheckBox*    m_chkOverlap    = nullptr;
     QCheckBox*    m_chkVerify     = nullptr;
-    // Idioma
     QComboBox*    m_cmbLanguage   = nullptr;
     QPushButton*  m_btnApplyOpts  = nullptr;
 
-    // ── Estado de copia ───────────────────────────────────────────────────
-    std::atomic<bool> m_copying   {false};
-    std::atomic<bool> m_paused_   {false};
-    qint64  m_totalBytes          = 0;
-    qint64  m_doneBytes           = 0;
-    int     m_totalFiles          = 0;
-    int     m_doneFiles           = 0;
-    int     m_failedFiles         = 0;
+    // Estado
+    std::atomic<bool> m_copying  {false};
+    bool              m_paused_  {false};
+    qint64  m_totalBytes = 0, m_doneBytes = 0;
+    int     m_totalFiles = 0, m_doneFiles = 0, m_failedFiles = 0;
 
-    // Worker thread (puntero para poder controlarlo)
     class CopyController;
-    CopyController* m_controller  = nullptr;
+    CopyController* m_controller = nullptr;
 };
