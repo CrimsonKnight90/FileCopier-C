@@ -39,3 +39,4 @@ Makefile
 # Archivos de sistema
 Thumbs.db
 .DS_Store
+src/core/FileCopyEngine.cpp

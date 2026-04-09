@@ -93,9 +93,10 @@ CopyResult FileCopyEngine::CopyFile(
     }
 
     // ── Copiar ────────────────────────────────────────────────────────────
-    if (m_opts.useOverlappedIO && !m_opts.useNoBuffering && fileSize > 0)
-        result = CopyOverlapped(hSrc, hDst, fileSize, onProgress);
-    else
+    if (m_opts.useOverlappedIO && !m_opts.useNoBuffering && fileSize > 0) {
+        DWORD sector = m_opts.useNoBuffering ? QuerySectorSize(dst) : 512;
+        result = CopyOverlapped(hSrc, hDst, fileSize, sector, onProgress);
+    } else
         result = CopySimple(hSrc, hDst, fileSize, onProgress);
 
     // Truncar al tamaño real si usamos NO_BUFFERING (puede sobrepasar)
