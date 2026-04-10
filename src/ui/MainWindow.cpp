@@ -67,7 +67,7 @@ public slots:
                 if (!e.isDirectory)
                     jobs.push_back({e.srcPath, e.dstPath});
                 else
-                    ::CreateDirectoryW((L"\\\\?\\" + e.dstPath).c_str(), nullptr);
+                    ::CreateDirectoryW(e.dstPath.c_str(), nullptr);
             }
         }
 
