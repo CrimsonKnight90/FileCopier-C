@@ -1,1 +1,42 @@
-(src/core/FileCopyEngine.cpp)
+# Ignorar carpeta de compilación
+/build/
+bin/
+*.exe
+*.dll
+*.obj
+*.o
+*.log
+
+# Archivos temporales de IDEs
+*.user
+*.user.*
+*.suo
+*.ncb
+*.opendb
+*.VC.db
+*.VC.opendb
+
+# Archivos de Qt Creator
+*.pro.user
+*.qbs.user
+*.qmlc
+*.jsc
+
+# Archivos de CMake generados
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.ninja
+.ninja_deps
+.ninja_log
+
+# Archivos de configuración locales
+*.ini~
+*.bak
+*.tmp
+
+# Archivos de sistema
+Thumbs.db
+.DS_Store
+src/core/FileCopyEngine.cpp
