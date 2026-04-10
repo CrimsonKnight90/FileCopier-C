@@ -8,6 +8,7 @@
 #include "../../include/Language.h"
 
 #include <QApplication>
+#include <QDir>
 #include <QCloseEvent>
 #include <QFileDialog>
 #include <QHBoxLayout>
@@ -61,19 +62,23 @@ public slots:
             EventBus::Instance().Emit(EventFileStarted{L"__scanning__", 0});
             DirectoryScanner scanner;
             std::vector<FileEntry> entries;
-            scanner.Scan(m_src.toStdWString(), m_dst.toStdWString(), entries,
+            scanner.Scan(QDir::toNativeSeparators(m_src).toStdWString(),
+                         QDir::toNativeSeparators(m_dst).toStdWString(), entries,
                          [](size_t /*n*/) {});
             for (auto& e : entries) {
                 if (!e.isDirectory)
                     jobs.push_back({e.srcPath, e.dstPath});
                 else
-                    ::CreateDirectoryW(e.dstPath.c_str(), nullptr);
+                    ::CreateDirectoryW((L"\\\\?\\" + e.dstPath).c_str(), nullptr);
             }
         }
 
         // Modo 2: archivos individuales de la lista
-        for (auto& pair : m_extraFiles)
-            jobs.push_back({pair.first.toStdWString(), pair.second.toStdWString()});
+        for (auto& pair : m_extraFiles) {
+            auto normSrc = QDir::toNativeSeparators(pair.first).toStdWString();
+            auto normDst = QDir::toNativeSeparators(pair.second).toStdWString();
+            jobs.push_back({normSrc, normDst});
+        }
 
         int totalFiles = (int)jobs.size();
 
@@ -150,13 +155,32 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle(TR("app.title"));
     BuildUI();
     ConnectEventBus();
+    m_panelWidget->hide();  // ocultar siempre al inicio
     LoadSettings();
-    // Tamaño inicial compacto
-    setFixedHeight(TOP_AREA_HEIGHT + statusBar()->sizeHint().height() + 10);
+    // Ajustar tamaño según estado del panel restaurado
+    if (!m_panelVisible) {
+        int h = TOP_AREA_HEIGHT + 30;
+        setFixedHeight(h);
+    }
     setMinimumWidth(700);
 }
 
 MainWindow::~MainWindow() { SaveSettings(); }
+
+void MainWindow::SyncFromConfig() {
+    // Sincronizar controles de Opciones con AppConfig
+    auto& cfg = ConfigManager::Instance().Config();
+    m_spThreads->setValue((int)cfg.threadCount);
+    m_spBufferKB->setValue((int)cfg.bufferSizeKB);
+    m_chkNoBuffer->setChecked(cfg.useNoBuffering);
+    m_chkOverlap->setChecked(cfg.useOverlapped);
+    m_chkVerify->setChecked(cfg.verifyAfterCopy);
+    // Sincronizar idioma
+    m_cmbLanguage->blockSignals(true);
+    m_cmbLanguage->setCurrentIndex((int)Language::Instance().Current());
+    m_cmbLanguage->blockSignals(false);
+    RetranslateUI();
+}
 
 void MainWindow::ShowOptionsTab() {
     if (!m_panelVisible) { m_panelVisible = false; OnTogglePanel(); }
@@ -534,15 +558,48 @@ void MainWindow::OnSrcDstChanged() {
             delete m_copyList->takeTopLevelItem(i);
     }
 
-    // Añadir una fila de preview de la carpeta
+    // Expandir el directorio origen y mostrar cada archivo en la lista
     QFileInfo fi(src);
-    auto* item = new QTreeWidgetItem;
-    item->setText(0, src);
-    item->setText(1, fi.isDir() ? "[dir]" : FormatSize(fi.size()));
-    item->setText(2, dst);
-    item->setText(3, TR("status.ready"));
-    item->setData(0, Qt::UserRole, "auto");
-    m_copyList->addTopLevelItem(item);
+    if (fi.isDir()) {
+        // Añadir todos los archivos del directorio recursivamente como "auto"
+        std::function<void(const QString&, const QString&)> expand;
+        expand = [&](const QString& srcD, const QString& dstD) {
+            QDir dir(srcD);
+            QString dstSub = dstD + QDir::separator() + dir.dirName();
+            for (auto& f : dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot)) {
+                auto* it = new QTreeWidgetItem;
+                it->setText(0, QDir::toNativeSeparators(f.absoluteFilePath()));
+                it->setText(1, FormatSize(f.size()));
+                it->setText(2, QDir::toNativeSeparators(dstSub + QDir::separator() + f.fileName()));
+                it->setText(3, TR("status.ready"));
+                it->setData(0, Qt::UserRole, "auto");
+                m_copyList->addTopLevelItem(it);
+            }
+            for (auto& d : dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot))
+                expand(d.absoluteFilePath(), dstSub);
+        };
+        // Expandir directamente dentro de dst (no crear subdirectorio de nivel 0)
+        QDir dir(src);
+        for (auto& f : dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot)) {
+            auto* it = new QTreeWidgetItem;
+            it->setText(0, QDir::toNativeSeparators(f.absoluteFilePath()));
+            it->setText(1, FormatSize(f.size()));
+            it->setText(2, QDir::toNativeSeparators(dst + QDir::separator() + f.fileName()));
+            it->setText(3, TR("status.ready"));
+            it->setData(0, Qt::UserRole, "auto");
+            m_copyList->addTopLevelItem(it);
+        }
+        for (auto& d : dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot))
+            expand(d.absoluteFilePath(), dst);
+    } else {
+        auto* it = new QTreeWidgetItem;
+        it->setText(0, QDir::toNativeSeparators(src));
+        it->setText(1, FormatSize(fi.size()));
+        it->setText(2, QDir::toNativeSeparators(dst + QDir::separator() + fi.fileName()));
+        it->setText(3, TR("status.ready"));
+        it->setData(0, Qt::UserRole, "auto");
+        m_copyList->addTopLevelItem(it);
+    }
 }
 
 void MainWindow::OnBrowseSrc() {
@@ -733,13 +790,44 @@ void MainWindow::OnAddFiles() {
 
 void MainWindow::AddPathToList(const QString& path) {
     QFileInfo fi(path);
-    auto* item = new QTreeWidgetItem;
-    item->setText(0, path);
-    item->setText(1, fi.isDir() ? "[dir]" : FormatSize(fi.size()));
     QString dst = m_dstEdit->text();
-    item->setText(2, dst.isEmpty() ? "" : dst + "/" + fi.fileName());
-    item->setText(3, TR("status.ready"));
-    m_copyList->addTopLevelItem(item);
+
+    if (fi.isDir()) {
+        // Expandir carpeta: añadir todos los archivos recursivamente
+        ExpandDirToList(path, dst.isEmpty() ? path : dst);
+    } else {
+        auto* item = new QTreeWidgetItem;
+        item->setText(0, QDir::toNativeSeparators(path));
+        item->setText(1, FormatSize(fi.size()));
+        QString dstFile = dst.isEmpty() ? ""
+            : QDir::toNativeSeparators(dst) + QDir::separator() + fi.fileName();
+        item->setText(2, dstFile);
+        item->setText(3, TR("status.ready"));
+        m_copyList->addTopLevelItem(item);
+    }
+}
+
+void MainWindow::ExpandDirToList(const QString& srcDir, const QString& dstDir) {
+    QDir dir(srcDir);
+    // Crear subdirectorio correspondiente en destino
+    QString dstSub = QDir::toNativeSeparators(
+        dstDir + QDir::separator() + dir.dirName());
+
+    // Archivos directos en esta carpeta
+    auto files = dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
+    for (auto& fi : files) {
+        auto* item = new QTreeWidgetItem;
+        item->setText(0, QDir::toNativeSeparators(fi.absoluteFilePath()));
+        item->setText(1, FormatSize(fi.size()));
+        item->setText(2, dstSub + QDir::separator() + fi.fileName());
+        item->setText(3, TR("status.ready"));
+        m_copyList->addTopLevelItem(item);
+    }
+
+    // Subdirectorios recursivos
+    auto subdirs = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (auto& sd : subdirs)
+        ExpandDirToList(sd.absoluteFilePath(), dstSub);
 }
 
 void MainWindow::OnRemoveSelected() {

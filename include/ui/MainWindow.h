@@ -14,6 +14,7 @@
 #include <QRadioButton>
 #include <QCheckBox>
 #include <QSpinBox>
+#include <QDir>
 #include <QGroupBox>
 #include <QResizeEvent>
 #include <QEvent>
@@ -26,6 +27,7 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
     void ShowOptionsTab();
+    void SyncFromConfig(); // sincronizar desde ConfigDialog
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -77,6 +79,7 @@ private:
     void SaveSettings();
     void LoadSettings();
     void AddPathToList(const QString& path);
+    void ExpandDirToList(const QString& srcDir, const QString& dstDir);
 
     QString FormatSize(qint64 bytes) const;
     QString FormatETA(double secs) const;

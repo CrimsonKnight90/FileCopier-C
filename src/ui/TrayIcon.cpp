@@ -1,5 +1,6 @@
 #include "../../include/ui/TrayIcon.h"
 #include "../../include/ui/MainWindow.h"
+#include "../../include/ui/ConfigDialog.h"
 #include "../../include/Language.h"
 #include <QApplication>
 #include <QStyle>
@@ -62,11 +63,14 @@ void TrayIcon::OnNewCopy() {
 }
 
 void TrayIcon::OnShowConfig() {
-    m_window->show();
-    m_window->raise();
-    m_window->activateWindow();
-    // Abrir pestaña opciones
-    m_window->ShowOptionsTab();
+    // Abrir ventana de configuración global (separada de la ventana principal)
+    auto* dlg = new ConfigDialog(m_window);
+    connect(dlg, &ConfigDialog::settingsChanged, m_window, [this](){
+        // Si la ventana principal está visible, sincronizarla
+        if (m_window->isVisible()) m_window->SyncFromConfig();
+    });
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->show();
 }
 
 void TrayIcon::OnQuit() {

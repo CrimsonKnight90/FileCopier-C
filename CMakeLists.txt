@@ -58,6 +58,7 @@ set(SOURCES
     src/ui/ErrorDialog.cpp
     src/ui/ErrorLog.cpp
     src/ui/TrayIcon.cpp
+    src/ui/ConfigDialog.cpp
 
     # Utils
     src/utils/Logger.cpp
@@ -81,6 +82,8 @@ set(HEADERS
     include/ui/ErrorDialog.h
     include/ui/ErrorLog.h
     include/ui/TrayIcon.h
+    include/ui/ConfigDialog.h
+    include/PathUtils.h
 )
 
 # ── Ejecutable ───────────────────────────────────────────────────────────────

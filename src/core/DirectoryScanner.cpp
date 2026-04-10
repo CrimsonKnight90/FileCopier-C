@@ -4,6 +4,13 @@
 
 namespace FileCopier {
 
+static std::wstring NormPath(std::wstring p) {
+    for (auto& c : p) if (c == L'/') c = L'\\';
+    while (!p.empty() && (p.back() == L'\\' || p.back() == L'/')) p.pop_back();
+    return p;
+}
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 bool DirectoryScanner::Scan(
     const std::wstring& srcRoot,
@@ -14,13 +21,15 @@ bool DirectoryScanner::Scan(
     m_cancelled  = false;
     m_totalBytes = 0;
     entries.clear();
+    const std::wstring normSrc = NormPath(srcRoot);
+    const std::wstring normDst = NormPath(dstRoot);
 
-    if (!::PathFileExistsW(srcRoot.c_str())) {
-        LOG_ERROR(L"Source directory not found: " + srcRoot);
+    if (!::PathFileExistsW(normSrc.c_str())) {
+        LOG_ERROR(L"Source directory not found: " + normSrc);
         return false;
     }
 
-    ScanDirectory(srcRoot, dstRoot, entries, onProgress);
+    ScanDirectory(normSrc, normDst, entries, onProgress);
     return !m_cancelled;
 }
 
@@ -33,22 +42,11 @@ void DirectoryScanner::ScanDirectory(
 {
     if (m_cancelled) return;
 
-    // Remover prefijo \\?\ si existe para evitar duplicación
-    auto cleanPath = [](const std::wstring& p) -> std::wstring {
-        if (p.size() >= 4 && p.substr(0, 4) == L"\\\\?\\") {
-            return p.substr(4);
-        }
-        return p;
-    };
-
-    std::wstring cleanSrc = cleanPath(srcDir);
-    std::wstring cleanDst = cleanPath(dstDir);
-
     WIN32_FIND_DATAW fd{};
-    std::wstring pattern = L"\\\\?\\" + cleanSrc + L"\\*";
+    std::wstring pattern = L"\\\\?\\" + srcDir + L"\\*";
     HANDLE hFind = ::FindFirstFileW(pattern.c_str(), &fd);
     if (hFind == INVALID_HANDLE_VALUE) {
-        LOG_WARNING(L"Cannot open directory: " + cleanSrc);
+        LOG_WARNING(L"Cannot open directory: " + srcDir);
         return;
     }
 
@@ -58,8 +56,8 @@ void DirectoryScanner::ScanDirectory(
         std::wstring name = fd.cFileName;
         if (name == L"." || name == L"..") continue;
 
-        std::wstring srcPath = cleanSrc + L"\\" + name;
-        std::wstring dstPath = cleanDst + L"\\" + name;
+        std::wstring srcPath = srcDir + L"\\" + name;
+        std::wstring dstPath = dstDir + L"\\" + name;
 
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             // Registrar el propio directorio (para crearlo en destino)
