@@ -1,152 +1,22 @@
 #pragma once
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
 #include <QMainWindow>
-#include <QLabel>
-#include <QLineEdit>
-#include <QProgressBar>
-#include <QTabWidget>
-#include <QTreeWidget>
-#include <QPushButton>
-#include <QComboBox>
-#include <QRadioButton>
-#include <QCheckBox>
-#include <QSpinBox>
-#include <QDir>
-#include <QGroupBox>
-#include <QResizeEvent>
-#include <QEvent>
-#include <QTimer>
-#include <atomic>
+#include "../AppController.h"
+
+class QPushButton;
+class QProgressBar;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
+
 public:
-    explicit MainWindow(QWidget* parent = nullptr);
-    ~MainWindow() override;
-    void ShowOptionsTab();
-    void SyncFromConfig(); // sincronizar desde ConfigDialog
-
-protected:
-    void closeEvent(QCloseEvent* event) override;
-    void resizeEvent(QResizeEvent* event) override;
-    void changeEvent(QEvent* event) override;
-
-signals:
-    void requestCancel();
-
-public slots:
-    void OnUIFileStarted(const QString& path, qint64 total);
-    void OnUIProgress(const QString& path, qint64 done, qint64 total);
-    void OnUIFileCompleted(const QString& path, bool success);
-    void OnUIError(const QString& path, const QString& action,
-                   const QString& target, const QString& errText);
-    void OnUISpeed(double mbps, qint64 done, qint64 total);
-    void OnUIQueueFinished(int total, int ok, int failed);
+    MainWindow(QWidget *parent = nullptr);
 
 private slots:
-    void OnBrowseSrc();
-    void OnBrowseDst();
-    void OnSrcDstChanged();
-    void OnStart();
-    void OnPause();
-    void OnCancel();
-    void OnTogglePanel();
-    void OnCopyListContextMenu(const QPoint& pos);
-    void OnAddFiles();
-    void OnRemoveSelected();
-    void OnMoveToTop();
-    void OnMoveUp();
-    void OnMoveDown();
-    void OnMoveToBottom();
-    void OnSaveList();
-    void OnLoadList();
-    void OnClearErrors();
-    void OnSaveErrors();
-    void OnLanguageChanged(int index);
-    void OnApplyOptions();
-    void OnDefaultOptions();
+    void onStart();
 
 private:
-    void BuildUI();
-    void BuildCopyListTab(QWidget* parent);
-    void BuildErrorTab(QWidget* parent);
-    void BuildOptionsTab(QWidget* parent);
-    void ConnectEventBus();
-    void RetranslateUI();
-    void SaveSettings();
-    void LoadSettings();
-    void AddPathToList(const QString& path);
-    void ExpandDirToList(const QString& srcDir, const QString& dstDir);
+    AppController controller;
 
-    QString FormatSize(qint64 bytes) const;
-    QString FormatETA(double secs) const;
-    QString FormatSpeed(double mbps) const;
-
-    // Layout
-    QWidget*      m_panelWidget   = nullptr;
-    QTabWidget*   m_tabs          = nullptr;
-    QPushButton*  m_toggleBtn     = nullptr;
-    bool          m_panelVisible  = false;
-
-    // Controles superiores
-    QLabel*       m_lblSrc        = nullptr;
-    QLabel*       m_lblDst        = nullptr;
-    QLabel*       m_lblSpeedKey   = nullptr;
-    QLineEdit*    m_srcEdit       = nullptr;
-    QLineEdit*    m_dstEdit       = nullptr;
-    QProgressBar* m_globalBar     = nullptr;
-    QLabel*       m_speedLabel    = nullptr;
-    QLabel*       m_etaLabel      = nullptr;
-    QLabel*       m_statsLabel    = nullptr;
-    QPushButton*  m_btnStart      = nullptr;
-    QPushButton*  m_btnPause      = nullptr;
-    QPushButton*  m_btnCancel     = nullptr;
-
-    // Tab lista de copia
-    QTreeWidget*  m_copyList      = nullptr;
-    QPushButton*  m_btnToTop      = nullptr;
-    QPushButton*  m_btnUp         = nullptr;
-    QPushButton*  m_btnDown       = nullptr;
-    QPushButton*  m_btnToBottom   = nullptr;
-    QPushButton*  m_btnAddFiles   = nullptr;
-    QPushButton*  m_btnRemove     = nullptr;
-    QPushButton*  m_btnSaveList   = nullptr;
-    QPushButton*  m_btnLoadList   = nullptr;
-
-    // Tab errores
-    QTreeWidget*  m_errorList     = nullptr;
-    QPushButton*  m_btnClearErr   = nullptr;
-    QPushButton*  m_btnSaveErr    = nullptr;
-
-    // Tab opciones — guardamos punteros a grupos para RetranslateUI
-    QGroupBox*    m_grpEnd        = nullptr;
-    QGroupBox*    m_grpCol        = nullptr;
-    QGroupBox*    m_grpErr        = nullptr;
-    QGroupBox*    m_grpPerf       = nullptr;
-    QGroupBox*    m_grpLang       = nullptr;
-    QRadioButton* m_rbNoCloseErr  = nullptr;
-    QRadioButton* m_rbNoClose     = nullptr;
-    QRadioButton* m_rbClose       = nullptr;
-    QComboBox*    m_cmbCollision  = nullptr;
-    QComboBox*    m_cmbErrPolicy  = nullptr;
-    QSpinBox*     m_spThreads     = nullptr;
-    QSpinBox*     m_spBufferKB    = nullptr;
-    QCheckBox*    m_chkNoBuffer   = nullptr;
-    QCheckBox*    m_chkOverlap    = nullptr;
-    QCheckBox*    m_chkVerify     = nullptr;
-    QComboBox*    m_cmbLanguage   = nullptr;
-    QPushButton*  m_btnApplyOpts  = nullptr;
-    QPushButton*  m_btnDefaultOpts= nullptr;
-
-    // Estado
-    std::atomic<bool> m_copying  {false};
-    bool              m_paused_  {false};
-    qint64  m_totalBytes = 0, m_doneBytes = 0;
-    int     m_totalFiles = 0, m_doneFiles = 0, m_failedFiles = 0;
-
-    class CopyController;
-    CopyController* m_controller = nullptr;
+    QPushButton* startButton;
+    QProgressBar* progressBar;
 };
