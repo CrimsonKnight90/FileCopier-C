@@ -1,41 +1,53 @@
-# Ignorar carpeta de compilación
-/build/
-bin/
+# ─── Rust / Cargo ────────────────────────────────────────────────────────────
+/target/
+**/*.rs.bk
+Cargo.lock          # En librerías se ignora; en binarios se versiona.
+                    # Como este repo tiene ambos, lo dejamos fuera del VCS
+                    # y cada crate decide. Ajusta si prefieres commit del lock.
+
+# ─── Artefactos de compilación ───────────────────────────────────────────────
 *.exe
 *.dll
-*.obj
-*.o
-*.log
+*.so
+*.dylib
+*.pdb
+*.ilk
+*.exp
+*.lib              # Libs de importación generadas por MSVC (no las de Rust)
 
-# Archivos temporales de IDEs
+# ─── Checkpoints y archivos temporales del motor ─────────────────────────────
+*.partial           # Archivos de copia incompleta generados por FileCopier
+*.checkpoint        # Archivos de estado de checkpointing
+*.fcp               # Extensión alternativa de checkpoint
+
+# ─── IDEs y editores ─────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.suo
 *.user
 *.user.*
-*.suo
-*.ncb
-*.opendb
+.vs/
 *.VC.db
 *.VC.opendb
 
-# Archivos de Qt Creator
-*.pro.user
-*.qbs.user
-*.qmlc
-*.jsc
-
-# Archivos de CMake generados
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-Makefile
-*.ninja
-.ninja_deps
-.ninja_log
-
-# Archivos de configuración locales
-*.ini~
-*.bak
-*.tmp
-
-# Archivos de sistema
+# ─── Sistema operativo ───────────────────────────────────────────────────────
 Thumbs.db
 .DS_Store
+desktop.ini
+
+# ─── Tauri (Fase 2) ──────────────────────────────────────────────────────────
+app-gui/node_modules/
+app-gui/dist/
+app-gui/.next/
+app-gui/src-tauri/target/
+app-gui/src-tauri/WixTools/
+
+# ─── Logs y telemetría ───────────────────────────────────────────────────────
+*.log
+logs/
+
+# ─── Benchmarks y flamegraphs ────────────────────────────────────────────────
+flamegraph.svg
+perf.data
+perf.data.old
+criterion/

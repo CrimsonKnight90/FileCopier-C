@@ -1,0 +1,27 @@
+[package]
+name        = "lib-os"
+version     = "0.1.0"
+edition     = "2021"
+description = "Abstracciones de sistema operativo para FileCopier-Rust: preallocación, rename atómico, permisos"
+
+[dependencies]
+# Nuestro crate de errores y tipos base
+lib-core = { path = "../lib-core" }
+
+# Logging estructurado
+tracing = { workspace = true }
+
+# Errores ergonómicos
+thiserror = { workspace = true }
+
+# Windows: acceso a WinAPI
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_System_IO",
+] }
+
+[lib]
+name = "lib_os"
+path = "src/lib.rs"

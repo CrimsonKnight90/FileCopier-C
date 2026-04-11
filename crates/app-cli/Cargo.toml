@@ -1,0 +1,21 @@
+[package]
+name        = "app-cli"
+version     = "0.1.0"
+edition     = "2021"
+description = "CLI de FileCopier-Rust: interfaz de línea de comandos para el motor dual de copia"
+
+[[bin]]
+name = "filecopier"
+path = "src/main.rs"
+
+[dependencies]
+# Nuestros crates
+lib-core = { path = "../lib-core" }
+lib-os   = { path = "../lib-os"   }
+
+# CLI profesional con derive macros
+clap = { workspace = true }
+
+# Logging estructurado
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
