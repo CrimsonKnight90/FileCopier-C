@@ -1,32 +1,38 @@
-//! Implementación de `ChecksumAlgorithm` usando XxHash3 (64-bit).
+//! Implementación de `ChecksumAlgorithm` usando XxHash64.
+//!
+//! ## Versión de librería
+//!
+//! Usamos `twox-hash = "1.6"` que expone `XxHash64` (semilla fija en 0).
+//! La v2.x renombra el tipo a `XxHash3_64`, pero introduce breaking changes
+//! en el API. Mantenemos 1.6 para estabilidad del workspace.
 //!
 //! ## Cuándo usar XxHash
 //!
-//! XxHash3 es la opción cuando se prioriza **velocidad pura** sobre
-//! seguridad criptográfica. Es ~2× más rápido que blake3 pero no es
-//! criptográficamente seguro.
+//! XxHash64 es la opción cuando se prioriza **velocidad pura** sobre
+//! seguridad criptográfica. Es significativamente más rápido que SHA-256
+//! pero no es criptográficamente seguro.
 //!
 //! **Casos de uso**: verificación de integridad en redes de confianza,
 //! deduplicación interna, entornos donde el adversario no puede manipular datos.
 //!
-//! **No usar para**: checksums expuestos al usuario final como garantía
-//! de seguridad.
+//! **No usar para**: checksums expuestos como garantía de seguridad.
 
 use std::hash::Hasher;
 
-use twox_hash::XxHash3_64;
+use twox_hash::XxHash64;
 
 use super::ChecksumAlgorithm;
 
-/// Hasher incremental basado en XxHash3 (64-bit).
+/// Hasher incremental basado en XxHash64 (semilla 0).
 pub struct XxHasher {
-    hasher: XxHash3_64,
+    hasher: XxHash64,
 }
 
 impl XxHasher {
     pub fn new() -> Self {
         Self {
-            hasher: XxHash3_64::default(),
+            // Semilla 0: determinista y reproducible entre ejecuciones.
+            hasher: XxHash64::with_seed(0),
         }
     }
 }
@@ -40,8 +46,6 @@ impl Default for XxHasher {
 impl ChecksumAlgorithm for XxHasher {
     #[inline]
     fn update(&mut self, data: &[u8]) {
-        // XxHash3 usa SIMD internamente en x86_64.
-        // La implementación es no-criptográfica pero extremadamente rápida.
         self.hasher.write(data);
     }
 
@@ -52,6 +56,6 @@ impl ChecksumAlgorithm for XxHasher {
     }
 
     fn name(&self) -> &'static str {
-        "xxhash3-64"
+        "xxhash64"
     }
 }
