@@ -66,7 +66,7 @@ impl OsAdapter for WindowsAdapter {
         };
 
         // FileAllocationInfo = 5 en el enum FILE_INFO_BY_HANDLE_CLASS de WinAPI
-        const FILE_ALLOCATION_INFO_CLASS: u32 = 5;
+        const FILE_ALLOCATION_INFO_CLASS: i32 = 5;
 
         let result = unsafe {
             windows_sys::Win32::Storage::FileSystem::SetFileInformationByHandle(
