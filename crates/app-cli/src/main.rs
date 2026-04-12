@@ -1,28 +1,6 @@
 //! # filecopier CLI
 //!
 //! Interfaz de línea de comandos para FileCopier-Rust.
-//!
-//! ## Uso básico
-//!
-//! ```bash
-//! # Copia simple
-//! filecopier /origen /destino
-//!
-//! # Con verificación de integridad (blake3)
-//! filecopier --verify /origen /destino
-//!
-//! # Con algoritmo alternativo
-//! filecopier --verify --hasher xxhash /origen /destino
-//!
-//! # Reanudar copia interrumpida
-//! filecopier --resume /origen /destino
-//!
-//! # Control de recursos
-//! filecopier --block-size 8 --swarm-limit 64 /origen /destino
-//!
-//! # Verbosidad
-//! filecopier -vv /origen /destino
-//! ```
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -41,18 +19,14 @@ use lib_core::{
 };
 use lib_os::traits::DriveKind;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Argumentos CLI
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// FileCopier-Rust — Motor de copia profesional de alto rendimiento
+/// Motor de copia de alto rendimiento con verificación de integridad
 #[derive(Parser, Debug)]
 #[command(
-    name    = "filecopier",
+    name       = "filecopier",
     version,
-    about   = "Motor de copia de alto rendimiento con verificación de integridad",
+    about      = "Motor de copia de alto rendimiento con verificación de integridad",
     long_about = None,
-    after_help = "Ejemplos:\n  filecopier /origen /destino\n  filecopier --verify --hasher blake3 /src /dst\n  filecopier --resume /src /dst"
+    after_help = "Ejemplos:\n  filecopier C:\\src C:\\dst\n  filecopier --verify --hasher blake3 C:\\src C:\\dst\n  filecopier --resume C:\\src C:\\dst"
 )]
 struct Cli {
     /// Ruta de origen (archivo o directorio)
@@ -63,67 +37,50 @@ struct Cli {
     #[arg(value_name = "DESTINO")]
     dest: PathBuf,
 
-    // ── Verificación ──────────────────────────────────────────────────────────
-
-    /// Habilita verificación de integridad mediante hashing post-copia
-    /// Short: --verify (sin short flag para evitar conflicto con -v de verbosity)
+    /// Habilita verificación de integridad post-copia
     #[arg(long)]
     verify: bool,
 
-    /// Algoritmo de hashing: blake3 (default), xxhash, sha2
+    /// Algoritmo de hashing: blake3, xxhash, sha2
     #[arg(long, default_value = "blake3", value_name = "ALGO")]
     hasher: String,
 
-    // ── Motor de bloques ──────────────────────────────────────────────────────
-
-    /// Tamaño de bloque en MB para archivos grandes [default: 4]
+    /// Tamaño de bloque en MB para archivos grandes
     #[arg(long, default_value_t = 4, value_name = "MB")]
     block_size: u64,
 
-    /// Umbral en MB para clasificar archivo como "grande" [default: 16]
+    /// Umbral en MB: archivos >= umbral usan motor de bloques
     #[arg(long, default_value_t = 16, value_name = "MB")]
     threshold: u64,
 
-    /// Capacidad del canal de bloques (máx bloques en vuelo) [default: 8]
+    /// Máximo de bloques en vuelo simultáneamente
     #[arg(long, default_value_t = 8, value_name = "N")]
     channel_cap: usize,
 
-    // ── Motor de enjambre ─────────────────────────────────────────────────────
-
-    /// Máximo de tareas concurrentes en el motor de enjambre [default: 128]
+    /// Máximo de tareas concurrentes para archivos pequeños
     #[arg(long, default_value_t = 128, value_name = "N")]
     swarm_limit: usize,
 
-    // ── Resiliencia ───────────────────────────────────────────────────────────
-
-    /// Reanudar desde checkpoint existente (si existe)
+    /// Reanudar desde checkpoint existente
     #[arg(long, short = 'r')]
     resume: bool,
 
-    /// No usar archivos .partial (peligroso: puede corromper destino en fallos)
+    /// Escribir directamente sin archivos .partial intermedios (no recomendado)
     #[arg(long, hide = true)]
     no_partial: bool,
 
-    // ── Heurísticas ───────────────────────────────────────────────────────────
-
-    /// Ignorar detección automática de hardware y usar configuración manual
+    /// Ignorar detección automática de hardware
     #[arg(long)]
     no_detect: bool,
 
-    // ── Diagnóstico ──────────────────────────────────────────────────────────
-
-    /// Nivel de verbosidad: -v info, -vv debug, -vvv trace
+    /// Nivel de verbosidad (-v info, -vv debug, -vvv trace)
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     verbosity: u8,
 
-    /// Salida en formato silencioso (solo errores y resumen final)
+    /// Mostrar solo errores y resumen final
     #[arg(long, short = 'q')]
     quiet: bool,
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Main
-// ─────────────────────────────────────────────────────────────────────────────
 
 fn main() {
     let cli = Cli::parse();
@@ -136,15 +93,13 @@ fn main() {
 }
 
 fn run(cli: Cli) -> lib_core::error::Result<()> {
-    // ── 1. Validar paths ──────────────────────────────────────────────────────
     if !cli.source.exists() {
         eprintln!("❌ El origen no existe: {}", cli.source.display());
         std::process::exit(2);
     }
 
-    // ── 2. Construir configuración ────────────────────────────────────────────
     let algorithm = Algorithm::from_str(&cli.hasher).unwrap_or_else(|e| {
-        eprintln!("⚠ {e}. Usando blake3 por defecto.");
+        eprintln!("⚠  {e}. Usando blake3 por defecto.");
         Algorithm::Blake3
     });
 
@@ -159,18 +114,16 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
         use_partial_files:       !cli.no_partial,
     };
 
-    // ── 3. Detección de hardware y ajuste de heurísticas ─────────────────────
     if !cli.no_detect {
         let adapter  = lib_os::platform_adapter();
         let strategy = adapter.compute_strategy(&cli.source, &cli.dest);
 
         tracing::info!(
-            "Hardware detectado: origen={:?}, destino={:?}",
+            "Hardware: origen={:?}, destino={:?}",
             strategy.source_kind,
             strategy.dest_kind
         );
 
-        // Aplicar heurísticas solo si el usuario no sobreescribió los defaults
         if cli.swarm_limit == 128 {
             config.swarm_concurrency = strategy.recommended_swarm_concurrency;
         }
@@ -183,14 +136,12 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
         }
     }
 
-    // ── 4. Validar configuración ──────────────────────────────────────────────
     config.validate()?;
 
     if !cli.quiet {
         print_config_banner(&config, &cli.source, &cli.dest);
     }
 
-    // ── 5. Control de flujo (Ctrl+C) ──────────────────────────────────────────
     let flow             = FlowControl::new();
     let flow_for_handler = flow.clone();
     let ctrl_c_count     = Arc::new(AtomicBool::new(false));
@@ -198,16 +149,15 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
 
     ctrlc_handler(move || {
         if count_clone.load(Ordering::Relaxed) {
-            eprintln!("\n⚠ Segunda interrupción: cancelando...");
+            eprintln!("\n⚠  Segunda interrupción: cancelando...");
             flow_for_handler.cancel();
         } else {
             count_clone.store(true, Ordering::Relaxed);
-            eprintln!("\n⏸ Pausa solicitada. Presiona Ctrl+C de nuevo para cancelar.");
+            eprintln!("\n⏸  Pausa solicitada. Presiona Ctrl+C de nuevo para cancelar.");
             flow_for_handler.pause();
         }
     });
 
-    // ── 6. Ejecutar motor ─────────────────────────────────────────────────────
     let start = Instant::now();
     let quiet = cli.quiet;
 
@@ -220,16 +170,13 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
     );
 
     let orchestrator = Orchestrator::new(config, flow);
-    let result = orchestrator.run(&cli.source, &cli.dest, Some(on_progress))?;
-
-    // ── 7. Resumen final ──────────────────────────────────────────────────────
-    let total_elapsed = start.elapsed();
+    let result       = orchestrator.run(&cli.source, &cli.dest, Some(on_progress))?;
 
     if !cli.quiet {
         println!();
     }
 
-    print_summary(&result, total_elapsed);
+    print_summary(&result, start.elapsed());
 
     if result.failed_files > 0 {
         std::process::exit(3);
@@ -238,11 +185,11 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// UI helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-fn print_config_banner(config: &EngineConfig, source: &std::path::Path, dest: &std::path::Path) {
+fn print_config_banner(
+    config: &EngineConfig,
+    source: &std::path::Path,
+    dest:   &std::path::Path,
+) {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("  FileCopier-Rust v{}", env!("CARGO_PKG_VERSION"));
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -256,7 +203,7 @@ fn print_config_banner(config: &EngineConfig, source: &std::path::Path, dest: &s
         if config.verify {
             format!("✓ ({})", config.hash_algorithm)
         } else {
-            "✗ (usa --verify para activar)".into()
+            "✗  (usa --verify para activar)".into()
         }
     );
     println!("  Checkpoint:   {}", if config.resume { "reanudar" } else { "nuevo" });
@@ -268,7 +215,7 @@ fn print_hardware_info(strategy: &lib_os::traits::CopyStrategy) {
     let label = |k: DriveKind| match k {
         DriveKind::Ssd     => "SSD/NVMe",
         DriveKind::Hdd     => "HDD",
-        DriveKind::Network => "RED",
+        DriveKind::Network => "Red",
         DriveKind::Unknown => "Desconocido",
     };
     println!(
@@ -314,24 +261,20 @@ fn print_summary(
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("  Completados:  {} archivos", result.completed_files);
     if result.failed_files > 0 {
-        println!("  ⚠ Fallidos:  {} archivos", result.failed_files);
+        println!("  ⚠  Fallidos: {} archivos", result.failed_files);
     }
     println!("  Copiados:     {:.1} MB", mb);
-    println!("  Tiempo:       {:.1}s", elapsed.as_secs_f64());
+    println!("  Tiempo:       {:.2}s", elapsed.as_secs_f64());
     println!("  Velocidad:    {:.1} MB/s (promedio)", avg_spd);
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     if result.failed_files == 0 {
         println!("  ✓ Copia completada exitosamente");
     } else {
-        println!("  ⚠ Copia completada con {} error(es)", result.failed_files);
+        println!("  ⚠  Copia completada con {} error(es)", result.failed_files);
         println!("    Revisa el checkpoint para detalles.");
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Logging y señales
-// ─────────────────────────────────────────────────────────────────────────────
 
 fn init_logging(verbosity: u8, quiet: bool) {
     use tracing_subscriber::EnvFilter;
@@ -358,7 +301,6 @@ fn init_logging(verbosity: u8, quiet: bool) {
         .init();
 }
 
-/// Handler de Ctrl+C portable (Windows + Unix).
 fn ctrlc_handler(handler: impl Fn() + Send + Sync + 'static) {
     #[cfg(unix)]
     {
@@ -368,11 +310,10 @@ fn ctrlc_handler(handler: impl Fn() + Send + Sync + 'static) {
         }
     }
 
-    // Windows: comportamiento por defecto (terminar proceso).
-    // TODO Fase 2: implementar SetConsoleCtrlHandler.
     #[cfg(windows)]
     {
         let _ = handler;
+        // TODO Fase 2: SetConsoleCtrlHandler para pausa limpia en Windows.
     }
 }
 
