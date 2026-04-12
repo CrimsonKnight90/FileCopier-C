@@ -19,6 +19,9 @@
 //!
 //! # Control de recursos
 //! filecopier --block-size 8 --swarm-limit 64 /origen /destino
+//!
+//! # Verbosidad
+//! filecopier -vv /origen /destino
 //! ```
 
 use std::path::PathBuf;
@@ -37,10 +40,6 @@ use lib_core::{
     telemetry::CopyProgress,
 };
 use lib_os::traits::DriveKind;
-
-// Importación condicional de libc para el handler de señales Unix
-#[cfg(unix)]
-use libc;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Argumentos CLI
@@ -67,7 +66,8 @@ struct Cli {
     // ── Verificación ──────────────────────────────────────────────────────────
 
     /// Habilita verificación de integridad mediante hashing post-copia
-    #[arg(long, short = 'v')]
+    /// Short: --verify (sin short flag para evitar conflicto con -v de verbosity)
+    #[arg(long)]
     verify: bool,
 
     /// Algoritmo de hashing: blake3 (default), xxhash, sha2
@@ -113,7 +113,7 @@ struct Cli {
     // ── Diagnóstico ──────────────────────────────────────────────────────────
 
     /// Nivel de verbosidad: -v info, -vv debug, -vvv trace
-    #[arg(long = "verbose", short, action = clap::ArgAction::Count)]
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     verbosity: u8,
 
     /// Salida en formato silencioso (solo errores y resumen final)
@@ -161,7 +161,7 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
 
     // ── 3. Detección de hardware y ajuste de heurísticas ─────────────────────
     if !cli.no_detect {
-        let adapter = lib_os::platform_adapter();
+        let adapter  = lib_os::platform_adapter();
         let strategy = adapter.compute_strategy(&cli.source, &cli.dest);
 
         tracing::info!(
@@ -171,7 +171,6 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
         );
 
         // Aplicar heurísticas solo si el usuario no sobreescribió los defaults
-        // (los defaults de clap son los valores exactos que ponemos aquí)
         if cli.swarm_limit == 128 {
             config.swarm_concurrency = strategy.recommended_swarm_concurrency;
         }
@@ -179,7 +178,9 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
             config.block_size_bytes = strategy.recommended_block_size;
         }
 
-        print_hardware_info(&strategy);
+        if !cli.quiet {
+            print_hardware_info(&strategy);
+        }
     }
 
     // ── 4. Validar configuración ──────────────────────────────────────────────
@@ -190,17 +191,13 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
     }
 
     // ── 5. Control de flujo (Ctrl+C) ──────────────────────────────────────────
-    let flow = FlowControl::new();
+    let flow             = FlowControl::new();
     let flow_for_handler = flow.clone();
-
-    // Handler de Ctrl+C: pausa limpia en lugar de aborto brusco.
-    // En una segunda señal, cancela definitivamente.
-    let ctrl_c_count = Arc::new(AtomicBool::new(false));
-    let count_clone  = Arc::clone(&ctrl_c_count);
+    let ctrl_c_count     = Arc::new(AtomicBool::new(false));
+    let count_clone      = Arc::clone(&ctrl_c_count);
 
     ctrlc_handler(move || {
         if count_clone.load(Ordering::Relaxed) {
-            // Segunda señal: cancelar
             eprintln!("\n⚠ Segunda interrupción: cancelando...");
             flow_for_handler.cancel();
         } else {
@@ -211,16 +208,15 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
     });
 
     // ── 6. Ejecutar motor ─────────────────────────────────────────────────────
-    let start    = Instant::now();
-    let quiet    = cli.quiet;
+    let start = Instant::now();
+    let quiet = cli.quiet;
 
-    // Callback de progreso para el thread de UI
     let on_progress: lib_core::engine::orchestrator::ProgressCallback = Box::new(
         move |progress: CopyProgress| {
             if !quiet {
                 print_progress(&progress);
             }
-        }
+        },
     );
 
     let orchestrator = Orchestrator::new(config, flow);
@@ -230,13 +226,13 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
     let total_elapsed = start.elapsed();
 
     if !cli.quiet {
-        println!(); // Nueva línea después de la barra de progreso
+        println!();
     }
 
     print_summary(&result, total_elapsed);
 
     if result.failed_files > 0 {
-        std::process::exit(3); // Exit code 3: completado con fallos parciales
+        std::process::exit(3);
     }
 
     Ok(())
@@ -255,35 +251,36 @@ fn print_config_banner(config: &EngineConfig, source: &std::path::Path, dest: &s
     println!("  Bloque:       {} MB", config.block_size_bytes / 1024 / 1024);
     println!("  Umbral:       {} MB", config.triage_threshold_bytes / 1024 / 1024);
     println!("  Enjambre:     {} tareas", config.swarm_concurrency);
-    println!("  Verificación: {}", if config.verify {
-        format!("✓ ({})", config.hash_algorithm)
-    } else {
-        "✗ (--verify para activar)".into()
-    });
+    println!(
+        "  Verificación: {}",
+        if config.verify {
+            format!("✓ ({})", config.hash_algorithm)
+        } else {
+            "✗ (usa --verify para activar)".into()
+        }
+    );
     println!("  Checkpoint:   {}", if config.resume { "reanudar" } else { "nuevo" });
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();
 }
 
 fn print_hardware_info(strategy: &lib_os::traits::CopyStrategy) {
-    let kind_label = |k: DriveKind| match k {
+    let label = |k: DriveKind| match k {
         DriveKind::Ssd     => "SSD/NVMe",
         DriveKind::Hdd     => "HDD",
         DriveKind::Network => "RED",
         DriveKind::Unknown => "Desconocido",
     };
-
     println!(
-        "  Hardware: {} → {}  |  enjambre={} bloques={}MB",
-        kind_label(strategy.source_kind),
-        kind_label(strategy.dest_kind),
+        "  Hardware: {} → {}  |  enjambre={} bloque={}MB",
+        label(strategy.source_kind),
+        label(strategy.dest_kind),
         strategy.recommended_swarm_concurrency,
-        strategy.recommended_block_size / 1024 / 1024
+        strategy.recommended_block_size / 1024 / 1024,
     );
 }
 
 fn print_progress(p: &CopyProgress) {
-    // Barra de progreso inline (sobreescribe la línea anterior)
     let bar_width: usize = 30;
     let filled = ((p.percent / 100.0) * bar_width as f64) as usize;
     let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
@@ -297,15 +294,17 @@ fn print_progress(p: &CopyProgress) {
         p.eta_human(),
     );
 
-    // Flush inmediato para que la terminal muestre el update
     use std::io::Write;
     let _ = std::io::stdout().flush();
 }
 
-fn print_summary(result: &lib_core::engine::orchestrator::CopyResult, elapsed: std::time::Duration) {
-    let mb_copied = result.copied_bytes as f64 / 1024.0 / 1024.0;
-    let avg_speed = if elapsed.as_secs_f64() > 0.0 {
-        mb_copied / elapsed.as_secs_f64()
+fn print_summary(
+    result:  &lib_core::engine::orchestrator::CopyResult,
+    elapsed: std::time::Duration,
+) {
+    let mb      = result.copied_bytes as f64 / 1024.0 / 1024.0;
+    let avg_spd = if elapsed.as_secs_f64() > 0.0 {
+        mb / elapsed.as_secs_f64()
     } else {
         0.0
     };
@@ -314,21 +313,19 @@ fn print_summary(result: &lib_core::engine::orchestrator::CopyResult, elapsed: s
     println!("  Resumen de copia");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("  Completados:  {} archivos", result.completed_files);
-
     if result.failed_files > 0 {
         println!("  ⚠ Fallidos:  {} archivos", result.failed_files);
     }
-
-    println!("  Copiados:     {:.1} MB", mb_copied);
+    println!("  Copiados:     {:.1} MB", mb);
     println!("  Tiempo:       {:.1}s", elapsed.as_secs_f64());
-    println!("  Velocidad:    {:.1} MB/s (promedio)", avg_speed);
+    println!("  Velocidad:    {:.1} MB/s (promedio)", avg_spd);
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     if result.failed_files == 0 {
         println!("  ✓ Copia completada exitosamente");
     } else {
         println!("  ⚠ Copia completada con {} error(es)", result.failed_files);
-        println!("    Revisa el checkpoint para detalles de los archivos fallidos.");
+        println!("    Revisa el checkpoint para detalles.");
     }
 }
 
@@ -353,7 +350,7 @@ fn init_logging(verbosity: u8, quiet: bool) {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(level))
+                .unwrap_or_else(|_| EnvFilter::new(level)),
         )
         .with_target(false)
         .with_thread_ids(false)
@@ -362,61 +359,29 @@ fn init_logging(verbosity: u8, quiet: bool) {
 }
 
 /// Handler de Ctrl+C portable (Windows + Unix).
-///
-/// ## Diseño
-///
-/// El problema central del handler de señales en Unix es que `signal()`
-/// solo acepta un puntero a función `extern "C"`, no un closure.
-/// La solución estándar es un `static` global que el handler de señal
-/// puede leer sin capturar nada del stack.
-///
-/// La clave del bug anterior: había DOS `static HANDLER` en scopes
-/// distintos. El `sigint_handler` veía su propio static (siempre vacío),
-/// no el del scope externo. La corrección: un único `static` en nivel
-/// de módulo, visible para ambos lados.
 fn ctrlc_handler(handler: impl Fn() + Send + Sync + 'static) {
-    // ── Unix: handler de SIGINT via static global ────────────────────────────
     #[cfg(unix)]
     {
-        // Static en nivel de módulo: el único punto de verdad compartido
-        // entre el código de setup y el `extern "C" fn sigint_handler`.
-        // Safety: se escribe exactamente una vez antes de instalar la señal.
-        UNIX_SIGNAL_HANDLER
-            .set(Arc::new(handler))
-            .ok(); // Ignorar error si ya fue inicializado (no debería ocurrir)
-
+        UNIX_SIGNAL_HANDLER.set(Arc::new(handler)).ok();
         unsafe {
             libc::signal(libc::SIGINT, unix_sigint_handler as libc::sighandler_t);
         }
     }
 
-    // ── Windows: sin handler personalizado en MVP ────────────────────────────
-    // SetConsoleCtrlHandler requiere una función estática también.
-    // Para MVP dejamos el comportamiento por defecto de Windows (terminar proceso).
-    // TODO Fase 2: implementar SetConsoleCtrlHandler con static global análogo.
+    // Windows: comportamiento por defecto (terminar proceso).
+    // TODO Fase 2: implementar SetConsoleCtrlHandler.
     #[cfg(windows)]
     {
         let _ = handler;
     }
 }
 
-// Static global para Unix: único punto de comunicación entre
-// el código de setup y el handler de señal `extern "C"`.
 #[cfg(unix)]
 static UNIX_SIGNAL_HANDLER: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>> =
     std::sync::OnceLock::new();
 
-/// Handler de señal SIGINT para Unix.
-///
-/// # Safety
-/// Esta función es invocada por el kernel en contexto de señal.
-/// Solo operaciones async-signal-safe están permitidas aquí.
-/// Llamar a un closure de Rust no es formalmente async-signal-safe,
-/// pero es la práctica estándar en aplicaciones CLI Rust (tokio, rayon, etc.).
-/// Para un handler 100% correcto, usar `signalfd` o `pipe` trick (Fase 2).
 #[cfg(unix)]
 extern "C" fn unix_sigint_handler(_sig: libc::c_int) {
-    // Acceso al static global: no hay captura, no hay allocation.
     if let Some(handler) = UNIX_SIGNAL_HANDLER.get() {
         handler();
     }
