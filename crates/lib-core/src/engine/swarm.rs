@@ -5,24 +5,22 @@
 //! ## Estrategia
 //!
 //! Lanza hasta `config.swarm_concurrency` tareas tokio en paralelo.
-//! Cada tarea copia un archivo de forma independiente.
-//!
 //! El `Semaphore` limita las tareas activas para no saturar:
-//! - File descriptors del OS (límite típico: 1024–4096 en Windows).
-//! - Cabezal del HDD si el destino es spinning disk.
+//! - File descriptors del OS.
+//! - Cabezal del HDD si el destino es disco mecánico.
 //!
-//! ## Por qué tokio y no rayon aquí
+//! ## Por qué tokio y no rayon
 //!
 //! Los archivos pequeños tienen latencia de metadatos dominante (open,
-//! stat, create, rename). Estas operaciones son I/O-bound, no CPU-bound.
+//! stat, create, rename). Son operaciones I/O-bound, no CPU-bound.
 //! tokio maneja cientos de tareas I/O con muy pocos threads OS,
 //! mientras que rayon crearía un thread por tarea (ineficiente para I/O).
 //!
 //! ## Hashing en el enjambre
 //!
-//! Cada tarea calcula su propio hash. Como los archivos son pequeños,
-//! el hash se calcula sobre el contenido completo en memoria (single-pass).
-//! No hay pipeline reader/writer: todo ocurre en la misma tarea.
+//! Para archivos pequeños, el hash se calcula sobre el contenido
+//! completo en memoria (single-pass). No hay pipeline reader/writer:
+//! todo ocurre en la misma tarea, más eficiente para archivos < 16 MB.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -60,10 +58,10 @@ impl SwarmEngine {
     /// Copia todos los archivos de `files` en paralelo.
     ///
     /// Retorna un `Vec` con el resultado de cada archivo (incluyendo fallos).
-    /// El enjambre nunca aborta por el fallo de un archivo individual.
+    /// El enjambre **nunca aborta** por el fallo de un archivo individual.
     pub async fn run(
         &self,
-        files:           Vec<FileEntry>,
+        files:            Vec<FileEntry>,
         _checkpoint_path: &Path, // Reservado para checkpointing del enjambre (Fase 2)
     ) -> Result<Vec<SwarmFileResult>> {
         if files.is_empty() {
@@ -86,7 +84,10 @@ impl SwarmEngine {
 
             let handle = tokio::spawn(async move {
                 // Adquirir slot del semáforo (backpressure del enjambre)
-                let _permit = sem.acquire().await.expect("Semáforo cerrado inesperadamente");
+                let _permit = sem
+                    .acquire()
+                    .await
+                    .expect("Semáforo cerrado inesperadamente");
 
                 if flow.is_cancelled() || flow.is_paused() {
                     return (entry.relative, Err(CoreError::Paused));
@@ -114,25 +115,24 @@ impl SwarmEngine {
     }
 }
 
-/// Copia un archivo pequeño de forma async (single-pass: leer → escribir).
+/// Copia un archivo pequeño de forma async (single-pass: leer todo → escribir).
 ///
-/// Para archivos pequeños, leer todo en memoria primero y luego escribir
-/// es más eficiente que el pipeline reader/writer porque evita el overhead
-/// del canal crossbeam para datos que caben en unas pocas KB.
+/// Para archivos < 16 MB, leer todo en memoria y luego escribir es más
+/// eficiente que el pipeline reader/writer porque evita el overhead del
+/// canal crossbeam para datos que caben en unas pocas KB/MB.
 async fn copy_small_file(
     entry:     &FileEntry,
     config:    &EngineConfig,
     telemetry: &TelemetryHandle,
 ) -> std::result::Result<Option<String>, CoreError> {
     // Leer el archivo completo en memoria
-    // Para archivos < 16 MB, esto es seguro y eficiente.
     let data = tokio::fs::read(&entry.source)
         .await
         .map_err(|e| CoreError::read(&entry.source, e))?;
 
     let size = data.len() as u64;
 
-    // Hash (single-pass sobre los datos ya en memoria)
+    // Hash single-pass (los datos ya están en memoria, no hay overhead de re-lectura)
     let hash = if config.verify {
         let mut hasher = HasherDispatch::new(config.hash_algorithm);
         hasher.update(&data);
@@ -148,11 +148,7 @@ async fn copy_small_file(
             .map_err(|e| CoreError::io(parent, e))?;
     }
 
-    // Escribir destino (con .partial si está habilitado).
-    // Se añade ".partial" como sufijo al nombre completo del archivo,
-    // NO se reemplaza la extensión existente.
-    //   foto.jpg  → foto.jpg.partial   ✓
-    //   Makefile  → Makefile.partial   ✓
+    // Construir path .partial (sufijo al nombre completo, NO reemplazamos extensión)
     let partial_dest = if config.use_partial_files {
         let file_name = entry.dest
             .file_name()
@@ -166,6 +162,7 @@ async fn copy_small_file(
         entry.dest.clone()
     };
 
+    // Escribir
     tokio::fs::write(&partial_dest, &data)
         .await
         .map_err(|e| CoreError::write(&partial_dest, e))?;

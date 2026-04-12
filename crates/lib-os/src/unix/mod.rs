@@ -6,22 +6,21 @@
 //!
 //! Usa `posix_fallocate(fd, 0, size)`. En ext4/xfs/btrfs reserva bloques
 //! reales sin escribir ceros (a diferencia de `ftruncate`).
-//!
-//! En macOS, `posix_fallocate` no está disponible en todos los FS;
-//! usamos `fcntl(F_PREALLOCATE)` como alternativa.
+//! En tmpfs y NFS no está soportado → degradación silenciosa.
 //!
 //! ## Metadatos en Unix
 //!
-//! Copia `mode` (permisos), `uid`/`gid` (si tenemos privilegios)
-//! y `atime`/`mtime` con resolución de nanosegundos.
+//! Copia `mode` (permisos), `uid`/`gid` (si tenemos privilegios root)
+//! y `atime`/`mtime` con resolución de nanosegundos via `futimens`.
 
 use std::path::Path;
-use std::os::unix::fs::MetadataExt;
 
 use lib_core::error::{CoreError, Result};
-use crate::traits::{DriveKind, OsAdapter};
-use crate::detect::detect_drive_kind;
 
+use crate::detect::detect_drive_kind;
+use crate::traits::{DriveKind, OsAdapter};
+
+/// Adapter Unix (Linux + macOS) usando llamadas POSIX.
 pub struct UnixAdapter;
 
 impl UnixAdapter {
@@ -59,14 +58,13 @@ impl OsAdapter for UnixAdapter {
         #[cfg(target_os = "linux")]
         {
             // posix_fallocate: reserva bloques sin escribir ceros.
-            // FALLOC_FL_KEEP_SIZE no está aquí: queremos extender el tamaño del archivo.
+            // Retorna un código de error como int (no pone errno).
             let result = unsafe {
                 libc::posix_fallocate(fd, 0, size as libc::off_t)
             };
 
             if result != 0 {
-                // En sistemas de archivos que no soportan fallocate (tmpfs, NFS),
-                // el error es EOPNOTSUPP (95). Degradamos silenciosamente.
+                // EOPNOTSUPP (95) en tmpfs/NFS: degradamos silenciosamente.
                 let err = std::io::Error::from_raw_os_error(result);
                 tracing::warn!(
                     "posix_fallocate no soportado en '{}': {} (degradando)",
@@ -80,19 +78,19 @@ impl OsAdapter for UnixAdapter {
 
         #[cfg(target_os = "macos")]
         {
-            // macOS: fcntl con F_PREALLOCATE
+            // macOS: fcntl con F_PREALLOCATE + ftruncate
             #[repr(C)]
             struct FStore {
-                fst_flags:    u32,
-                fst_posmode:  i32,
-                fst_offset:   i64,
-                fst_length:   i64,
+                fst_flags:      u32,
+                fst_posmode:    i32,
+                fst_offset:     i64,
+                fst_length:     i64,
                 fst_bytesalloc: i64,
             }
 
-            const F_PREALLOCATE: libc::c_int = 42;
+            const F_PREALLOCATE:   libc::c_int = 42;
             const F_ALLOCATECONTIG: u32 = 0x00000002;
-            const F_PEOFPOSMODE: i32 = 3;
+            const F_PEOFPOSMODE:    i32 = 3;
 
             let mut fst = FStore {
                 fst_flags:      F_ALLOCATECONTIG,
@@ -120,6 +118,7 @@ impl OsAdapter for UnixAdapter {
 
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
+            let _ = fd;
             tracing::warn!("Preallocación no implementada para esta variante Unix");
         }
 
@@ -127,18 +126,16 @@ impl OsAdapter for UnixAdapter {
     }
 
     fn copy_metadata(&self, source: &Path, dest: &Path) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
         use std::os::unix::fs::PermissionsExt;
 
         let src_meta = std::fs::metadata(source)
             .map_err(|e| CoreError::io(source, e))?;
 
-        // 1. Permisos (mode)
+        // 1. Permisos (mode bits POSIX)
         let mode = src_meta.mode();
-        std::fs::set_permissions(
-            dest,
-            std::fs::Permissions::from_mode(mode),
-        )
-        .map_err(|e| CoreError::io(dest, e))?;
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(mode))
+            .map_err(|e| CoreError::io(dest, e))?;
 
         // 2. Timestamps (atime + mtime) con nanosegundos
         #[cfg(target_os = "linux")]
@@ -165,22 +162,20 @@ impl OsAdapter for UnixAdapter {
             }
         }
 
-        // 3. uid/gid (solo si tenemos permisos de root; en caso contrario, ignorar)
+        // 3. uid/gid (solo si somos root; en caso contrario EPERM es esperado)
         #[cfg(target_os = "linux")]
         {
-            let uid = src_meta.uid();
-            let gid = src_meta.gid();
-
             use std::ffi::CString;
             use std::os::unix::ffi::OsStrExt;
 
+            let uid = src_meta.uid();
+            let gid = src_meta.gid();
+
             if let Ok(dest_cstr) = CString::new(dest.as_os_str().as_bytes()) {
-                let result = unsafe {
-                    libc::lchown(dest_cstr.as_ptr(), uid, gid)
-                };
+                let result = unsafe { libc::lchown(dest_cstr.as_ptr(), uid, gid) };
                 if result != 0 {
-                    // EPERM es esperado sin root: ignorar silenciosamente
                     let err = std::io::Error::last_os_error();
+                    // EPERM sin root: silencioso. Otros errores: warning.
                     if err.raw_os_error() != Some(libc::EPERM) {
                         tracing::warn!("lchown falló en '{}': {}", dest.display(), err);
                     }

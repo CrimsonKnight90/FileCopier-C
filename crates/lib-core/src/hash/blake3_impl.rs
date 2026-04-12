@@ -5,10 +5,9 @@
 //! ## Por qué blake3
 //!
 //! - Hasta 6× más rápido que SHA-256 en x86_64 con SIMD.
-//! - Paralelizable internamente: aprovecha múltiples cores vía rayon.
+//! - Paralelizable internamente: aprovecha múltiples cores.
 //! - Resistente a colisiones: seguridad equivalente a SHA-3.
-//! - Ideal para verificación de integridad de transferencias, no para
-//!   firmas criptográficas (para eso usar sha2).
+//! - Ideal para verificación de integridad de transferencias.
 
 use super::ChecksumAlgorithm;
 
@@ -35,12 +34,11 @@ impl ChecksumAlgorithm for Blake3Hasher {
     #[inline]
     fn update(&mut self, data: &[u8]) {
         // blake3::Hasher::update es SIMD-optimized y muy cache-friendly.
-        // No hay overhead de lock ni de alojamiento por bloque.
         self.hasher.update(data);
     }
 
     fn finalize(self: Box<Self>) -> String {
-        // El digest de blake3 es 32 bytes (256 bits), representado en hex = 64 chars.
+        // El digest de blake3 es 32 bytes (256 bits) → 64 chars hex.
         self.hasher.finalize().to_hex().to_string()
     }
 

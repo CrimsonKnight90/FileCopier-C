@@ -3,13 +3,14 @@
 //! ## Cuándo usar SHA-256
 //!
 //! SHA-256 es la opción cuando se necesita **interoperabilidad** con
-//! sistemas externos que esperan checksums estándar (por ejemplo, verificación
-//! de ISOs, hashes publicados en manifiestos oficiales).
+//! sistemas externos que esperan checksums estándar (verificación
+//! de ISOs, hashes publicados en manifiestos oficiales, etc.).
 //!
 //! Es ~3-4× más lento que blake3. No hay razón de usarlo internamente
 //! salvo compatibilidad con terceros.
 
 use sha2::{Digest, Sha256};
+
 use super::ChecksumAlgorithm;
 
 /// Hasher incremental basado en SHA-256.

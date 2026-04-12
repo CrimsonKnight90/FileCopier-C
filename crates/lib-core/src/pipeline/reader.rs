@@ -4,9 +4,9 @@
 //!
 //! ## Responsabilidades
 //!
-//! - Abrir el archivo origen con buffers optimizados para lectura secuencial.
+//! - Abrir el archivo origen.
 //! - Leer en bloques de tamaño fijo (`config.block_size_bytes`).
-//! - Enviar cada bloque al canal crossbeam (bloqueante — backpressure natural).
+//! - Enviar cada bloque al canal crossbeam (bloqueante → backpressure natural).
 //! - Computar el hash del origen si `config.verify == true`.
 //! - Respetar `FlowControl`: pausar limpiamente entre bloques.
 //!
@@ -14,6 +14,12 @@
 //!
 //! `BlockReader` corre en un thread OS dedicado (no tokio) porque usa
 //! I/O síncrono. Vive en el thread del pipeline, no en el runtime async.
+//!
+//! ## Por qué `read()` en vez de `read_exact()`
+//!
+//! `read_exact` fallaría con `UnexpectedEof` en el último bloque si el
+//! archivo no es múltiplo exacto del tamaño de bloque. `read()` devuelve
+//! los bytes disponibles y nosotros truncamos el buffer al tamaño real.
 
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -37,8 +43,8 @@ pub struct BlockReader {
 
 impl BlockReader {
     pub fn new(
-        config: EngineConfig,
-        flow: FlowControl,
+        config:    EngineConfig,
+        flow:      FlowControl,
         telemetry: TelemetryHandle,
     ) -> Self {
         Self { config, flow, telemetry }
@@ -46,7 +52,7 @@ impl BlockReader {
 
     /// Lee `source_path` en bloques y los envía por `tx`.
     ///
-    /// Retorna el hash del origen si `config.verify == true`.
+    /// Retorna `Some(hash_hex)` si `config.verify == true`, `None` si no.
     /// El canal se cierra automáticamente cuando este método retorna (drop de `tx`).
     pub fn run(
         &self,
@@ -67,71 +73,62 @@ impl BlockReader {
             None
         };
 
-        let mut offset: u64 = 0;
+        let mut offset:   u64 = 0;
         let mut sequence: u64 = 0;
 
         loop {
-            // ── Comprobar pausa/cancelación entre bloques ─────────────────────
+            // ── Comprobar pausa/cancelación ENTRE bloques ──────────────────
             // No interrumpimos a mitad de bloque: terminamos el read actual
-            // y luego comprobamos. Garantiza que el escritor reciba bloques completos.
+            // y luego comprobamos. Garantiza bloques completos al escritor.
             match self.flow.check() {
-                Ok(()) => {},
+                Ok(()) => {}
                 Err(CoreError::Paused) => {
-                    tracing::debug!("Reader: pausa detectada en bloque {sequence}");
-                    // Esperar hasta reanudar o cancelar
+                    tracing::debug!("Reader: pausa detectada antes del bloque {sequence}");
                     self.flow.wait_for_resume()?;
                     tracing::debug!("Reader: reanudado en bloque {sequence}");
-                },
+                }
                 Err(e) => return Err(e),
             }
 
-            // ── Leer siguiente bloque ─────────────────────────────────────────
+            // ── Leer siguiente bloque ──────────────────────────────────────
             let mut buf = vec![0u8; self.config.block_size_bytes];
 
-            // `read` puede retornar menos bytes que el buffer (fin de archivo,
-            // fragmentación del OS). Usamos `read` en lugar de `read_exact`
-            // para manejar el último bloque correctamente.
             let n = reader
                 .read(&mut buf)
                 .map_err(|e| CoreError::read(source_path, e))?;
 
             if n == 0 {
-                // EOF: fin del archivo. El canal se cierra al hacer drop del tx.
+                // EOF: el canal se cierra cuando este método hace drop del tx.
                 tracing::debug!(
-                    "Reader: EOF en offset={offset}, bloques enviados={sequence}"
+                    "Reader: EOF — offset={offset}, bloques enviados={sequence}"
                 );
                 break;
             }
 
-            // Truncar al tamaño real leído (importante para el último bloque)
+            // Truncar al tamaño real leído (crítico para el último bloque)
             buf.truncate(n);
 
-            // ── Hash incremental del origen ───────────────────────────────────
+            // ── Hash incremental del origen ────────────────────────────────
             if let Some(ref mut h) = hasher {
                 h.update(&buf);
             }
 
-            // ── Telemetría: bytes leídos ──────────────────────────────────────
-            // Nota: aquí registramos bytes LEÍDOS, no escritos.
-            // El escritor también actualizará para bytes escritos.
-            // Para MVP, el reader es quien lleva la cuenta de progreso.
+            // ── Telemetría ─────────────────────────────────────────────────
             self.telemetry.add_bytes(n as u64);
 
             let block = Block::new(buf, offset, sequence);
             offset   += n as u64;
             sequence += 1;
 
-            // ── Enviar al canal (bloqueante = backpressure) ───────────────────
+            // ── Enviar al canal (bloqueante = backpressure) ────────────────
             // Si el canal está lleno, esta llamada bloquea el thread del reader
-            // hasta que el writer consuma un slot. Esto es el backpressure.
+            // hasta que el writer consuma un slot. Es el backpressure.
             if tx.send(block).is_err() {
                 // El receiver (writer) se cayó: error fatal del pipeline.
                 return Err(CoreError::PipelineDisconnected);
             }
         }
 
-        // Finalizar hash y retornar
-        let hash = hasher.map(|h| h.finalize());
-        Ok(hash)
+        Ok(hasher.map(|h| h.finalize()))
     }
 }

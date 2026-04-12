@@ -4,17 +4,19 @@
 //!
 //! XxHash3 es la opción cuando se prioriza **velocidad pura** sobre
 //! seguridad criptográfica. Es ~2× más rápido que blake3 pero no es
-//! criptográficamente seguro (susceptible a ataques de colisión deliberada).
+//! criptográficamente seguro.
 //!
 //! **Casos de uso**: verificación de integridad en redes de confianza,
-//! deduplicación interna, donde el adversario no puede manipular los datos.
+//! deduplicación interna, entornos donde el adversario no puede manipular datos.
 //!
 //! **No usar para**: checksums expuestos al usuario final como garantía
-//! de seguridad, o en contextos donde los datos vienen de fuentes no confiables.
+//! de seguridad.
 
 use std::hash::Hasher;
-use super::ChecksumAlgorithm;
+
 use twox_hash::XxHash3_64;
+
+use super::ChecksumAlgorithm;
 
 /// Hasher incremental basado en XxHash3 (64-bit).
 pub struct XxHasher {

@@ -9,21 +9,21 @@
 //! │  BlockReader │ ──────────► │  BlockWriter │
 //! │  (thread A)  │  backpress. │  (thread B)  │
 //! └──────────────┘             └──────────────┘
+//!        │                            │
+//!      hash origen               hash destino
 //! ```
 //!
 //! ## Concurrencia
 //!
 //! Dos threads OS (no tokio):
-//! - Thread A: `BlockReader` — lee del origen.
-//! - Thread B: `BlockWriter` — escribe al destino.
+//! - Thread A: `BlockReader` — lee del origen y envía al canal.
+//! - Thread B: el thread que llama a `copy_file()` actúa como writer.
+//!   Esto reduce el overhead de context-switch vs un tercer thread.
 //!
-//! El canal crossbeam hace de cola con backpressure natural.
-//! Si el destino es más lento que el origen, el reader se bloquea.
-//!
-//! ## Hashing
+//! ## Verificación cruzada
 //!
 //! Ambos threads calculan su propio hash incremental.
-//! Al finalizar, el orquestador compara origen vs destino.
+//! Al finalizar, se compara origen vs destino.
 //! Si no coinciden → `CoreError::HashMismatch`.
 
 use std::path::Path;
@@ -54,56 +54,62 @@ impl BlockEngine {
 
     /// Copia un archivo grande usando el pipeline de bloques.
     ///
-    /// Retorna `Some(hash)` si `config.verify == true`, `None` en caso contrario.
+    /// Retorna `Some(hash_hex)` si `config.verify == true`, `None` si no.
     pub fn copy_file(&self, source: &Path, dest: &Path) -> Result<Option<String>> {
         tracing::debug!(
-            "BlockEngine: iniciando copia\n  origen:  {}\n  destino: {}",
+            "BlockEngine: {} → {}",
             source.display(),
             dest.display()
         );
 
-        // ── Canal crossbeam con backpressure ──────────────────────────────────
-        // Capacidad fija: máx `channel_capacity` bloques en vuelo.
-        // RAM máxima = channel_capacity × block_size_bytes (validado en config).
+        // ── Canal crossbeam con backpressure ──────────────────────────────
         let (tx, rx) = crossbeam::channel::bounded(self.config.channel_capacity);
 
-        // ── Clonar para mover a los threads ───────────────────────────────────
+        // ── Clonar para mover a los threads ───────────────────────────────
         let config_reader = (*self.config).clone();
-        let config_writer = (*self.config).clone();
         let flow_reader   = self.flow.clone();
         let telemetry_r   = self.telemetry.clone();
         let source_path   = source.to_path_buf();
-        let dest_path     = dest.to_path_buf();
 
-        // ── Thread A: Reader ──────────────────────────────────────────────────
+        // ── Thread A: Reader ──────────────────────────────────────────────
         let reader_handle = thread::Builder::new()
-            .name(format!("block-reader:{}", source.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("?")))
+            .name(format!(
+                "block-reader:{}",
+                source.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+            ))
             .spawn(move || {
                 let reader = BlockReader::new(config_reader, flow_reader, telemetry_r);
                 reader.run(&source_path, tx)
             })
-            .map_err(|e| CoreError::io(source, std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("No se pudo crear thread reader: {e}")
-            )))?;
+            .map_err(|e| {
+                CoreError::io(
+                    source,
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("No se pudo crear thread reader: {e}"),
+                    ),
+                )
+            })?;
 
-        // ── Thread B: Writer (en el thread actual) ────────────────────────────
-        // No creamos un tercer thread: el thread que llama a copy_file()
-        // actúa como writer. Esto reduce el overhead de context-switch.
-        let writer = BlockWriter::new(config_writer);
-        let write_result = writer.run(&dest_path, rx, None /* hash se compara abajo */);
+        // ── Thread B: Writer (en el thread actual) ────────────────────────
+        let config_writer = (*self.config).clone();
+        let writer  = BlockWriter::new(config_writer);
+        // Pasamos source_hash = None aquí: la verificación cruzada la hacemos
+        // nosotros abajo comparando los dos hashes por separado. Esto evita
+        // que el writer intente verificar antes de que el reader haya terminado.
+        let write_result = writer.run(dest, rx, None);
 
-        // ── Recoger resultado del reader ──────────────────────────────────────
+        // ── Recoger resultado del reader ──────────────────────────────────
         let source_hash = reader_handle
             .join()
             .map_err(|_| CoreError::PipelineDisconnected)??;
 
-        // ── Propagar error del writer (si lo hay) ─────────────────────────────
+        // ── Propagar error del writer ─────────────────────────────────────
         let write_result = write_result?;
 
-        // ── Verificación cruzada de hashes ────────────────────────────────────
+        // ── Verificación cruzada de hashes ────────────────────────────────
         if self.config.verify {
             match (&source_hash, &write_result.dest_hash) {
                 (Some(src), Some(dst)) if src != dst => {

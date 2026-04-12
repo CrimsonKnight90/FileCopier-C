@@ -7,9 +7,8 @@
 //! El trait es la única interfaz que conoce el motor. Las implementaciones
 //! concretas quedan aisladas en sus propios submódulos.
 //!
-//! El enum `Algorithm` permite selección en runtime sin boxing (usamos
-//! dispatch estática mediante un enum en lugar de `dyn Trait`, evitando
-//! vtable overhead en el hot path del pipeline).
+//! El enum `Algorithm` permite selección en runtime sin boxing innecesario.
+//! `HasherDispatch` ofrece dispatch estático (sin vtable) para el hot path.
 
 pub mod blake3_impl;
 pub mod sha2_impl;
@@ -42,14 +41,14 @@ impl std::str::FromStr for Algorithm {
             "blake3"           => Ok(Algorithm::Blake3),
             "xxhash" | "xx"   => Ok(Algorithm::XxHash),
             "sha2" | "sha256" => Ok(Algorithm::Sha2),
-            other => Err(format!("Algoritmo desconocido: '{other}'. Usa: blake3, xxhash, sha2")),
+            other => Err(format!(
+                "Algoritmo desconocido: '{other}'. Usa: blake3, xxhash, sha2"
+            )),
         }
     }
 }
 
 /// Trait que debe implementar cualquier hasher compatible con el motor.
-///
-/// ## Implementación
 ///
 /// Los hashers son **incrementales**: el motor los alimenta bloque a bloque
 /// para no cargar el archivo completo en memoria.
@@ -58,14 +57,13 @@ impl std::str::FromStr for Algorithm {
 /// let mut h = MyHasher::new();
 /// h.update(&block1);
 /// h.update(&block2);
-/// let digest = h.finalize();
+/// let digest = Box::new(h).finalize();
 /// ```
 pub trait ChecksumAlgorithm: Send {
     /// Incorpora `data` al estado interno del hasher.
     fn update(&mut self, data: &[u8]);
 
     /// Finaliza el cálculo y retorna el digest como string hex.
-    ///
     /// Esta operación consume el hasher (no se puede reusar).
     fn finalize(self: Box<Self>) -> String;
 
@@ -73,10 +71,10 @@ pub trait ChecksumAlgorithm: Send {
     fn name(&self) -> &'static str;
 }
 
-/// Factory: construye un hasher concreto según el algoritmo seleccionado.
+/// Construye un hasher concreto según el algoritmo seleccionado.
 ///
-/// Retorna un `Box<dyn ChecksumAlgorithm>` para uso en contextos dinámicos
-/// (pipeline, telemetría). Para el hot path, usar `HasherDispatch` directamente.
+/// Retorna `Box<dyn ChecksumAlgorithm>` para contextos dinámicos.
+/// Para el hot path del pipeline, usar `HasherDispatch` (sin vtable).
 pub fn new_hasher(algorithm: Algorithm) -> Box<dyn ChecksumAlgorithm> {
     match algorithm {
         Algorithm::Blake3 => Box::new(blake3_impl::Blake3Hasher::new()),
@@ -85,10 +83,10 @@ pub fn new_hasher(algorithm: Algorithm) -> Box<dyn ChecksumAlgorithm> {
     }
 }
 
-/// Enum de dispatch estático para el hot path del pipeline.
+/// Dispatch estático para el hot path del pipeline.
 ///
 /// Evita vtable overhead manteniendo el mismo API que `dyn ChecksumAlgorithm`.
-/// Úsalo cuando el algoritmo se conoce en tiempo de compilación del bloque de lógica.
+/// El compilador puede hacer inlining completo de `update()` con esta forma.
 pub enum HasherDispatch {
     Blake3(blake3_impl::Blake3Hasher),
     XxHash(xxhash_impl::XxHasher),
@@ -104,6 +102,7 @@ impl HasherDispatch {
         }
     }
 
+    #[inline]
     pub fn update(&mut self, data: &[u8]) {
         match self {
             Self::Blake3(h) => h.update(data),

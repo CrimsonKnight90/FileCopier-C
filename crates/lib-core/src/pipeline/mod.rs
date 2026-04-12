@@ -2,7 +2,7 @@
 //!
 //! Componentes del pipeline de copia para archivos grandes.
 //!
-//! ## Arquitectura del pipeline
+//! ## Arquitectura
 //!
 //! ```text
 //! ┌──────────────┐  crossbeam::channel  ┌──────────────┐
@@ -17,15 +17,14 @@
 //! ## Backpressure
 //!
 //! El canal crossbeam tiene capacidad fija (`config.channel_capacity`).
-//! Si el escritor no puede mantener el ritmo del lector (por ejemplo,
-//! destino HDD vs origen NVMe), el lector se bloquea en `send()`.
-//! Esto evita cargar el archivo completo en RAM.
+//! Si el escritor no puede mantener el ritmo del lector, el lector se bloquea
+//! en `send()`. Esto evita cargar el archivo completo en RAM.
 //!
-//! ## Bloques
+//! ## Fin de stream
 //!
-//! Cada `Block` es un `Vec<u8>` de tamaño `config.block_size_bytes`.
-//! El último bloque puede ser menor. El fin del stream se señala
-//! cerrando el canal (el sender se hace drop), no con un bloque sentinel.
+//! El fin del stream se señala cerrando el canal (el Sender hace drop),
+//! no con un bloque sentinel. Esto es idiomático en Rust y evita
+//! condiciones de carrera al detectar EOF.
 
 pub mod reader;
 pub mod writer;
@@ -35,17 +34,17 @@ pub use writer::BlockWriter;
 
 /// Un bloque de datos leído del origen, listo para ser escrito y hasheado.
 ///
-/// El campo `data` es un `Vec<u8>` reutilizable. En versiones futuras
-/// podría ser reemplazado por un buffer pool para evitar allocaciones.
+/// El campo `data` es un `Vec<u8>`. En versiones futuras podría ser
+/// reemplazado por un buffer pool para evitar allocaciones por bloque.
 #[derive(Debug)]
 pub struct Block {
-    /// Datos del bloque.
+    /// Datos del bloque (truncados al tamaño real leído).
     pub data: Vec<u8>,
 
-    /// Offset dentro del archivo (útil para escritura directa y checksums parciales).
+    /// Offset dentro del archivo origen (para diagnóstico y Direct I/O futuro).
     pub offset: u64,
 
-    /// Número de secuencia del bloque (0-indexed). Útil para diagnóstico.
+    /// Número de secuencia del bloque (0-indexed, para diagnóstico).
     pub sequence: u64,
 }
 
@@ -54,10 +53,12 @@ impl Block {
         Self { data, offset, sequence }
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }

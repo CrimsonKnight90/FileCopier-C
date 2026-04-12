@@ -7,24 +7,30 @@
 //! - Crear el archivo destino como `.partial` (si `config.use_partial_files`).
 //! - Recibir bloques del canal crossbeam y escribirlos secuencialmente.
 //! - Computar el hash del destino si `config.verify == true`.
-//! - Verificar hash origen vs destino al finalizar.
 //! - Realizar rename atómico del `.partial` al nombre final.
-//! - Respetar `FlowControl`: al pausar, vaciar buffer y cerrar el archivo
-//!   de forma limpia antes de suspender.
 //!
 //! ## Garantías de escritura
 //!
 //! El writer usa `BufWriter` para agrupar escrituras pequeñas.
-//! Al pausar, llama a `flush()` explícitamente antes de señalar que está listo.
+//! Al finalizar llama a `flush()` explícitamente antes del rename.
 //! Esto garantiza que no hay datos en el buffer del OS que puedan perderse.
+//!
+//! ## Convención de nombre `.partial`
+//!
+//! Se añade `.partial` como **sufijo al nombre completo**, NO se reemplaza
+//! la extensión existente.
+//!
+//!   foto.jpg  → foto.jpg.partial   ✓
+//!   Makefile  → Makefile.partial   ✓
+//!   foto.jpg  → foto.partial       ✗  (with_extension reemplaza)
 //!
 //! ## Rename atómico
 //!
-//! En Windows y Linux, `std::fs::rename` es atómico a nivel de sistema
-//! de archivos dentro del mismo volumen. El archivo `.partial` nunca
-//! aparece como el nombre final hasta que la copia está completa y verificada.
+//! En Windows y Linux, `std::fs::rename` es atómico dentro del mismo
+//! volumen. El archivo `.partial` nunca aparece con el nombre final
+//! hasta que la copia está completa y verificada.
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
@@ -43,7 +49,7 @@ pub struct WriteResult {
     /// Bytes totales escritos.
     pub bytes_written: u64,
 
-    /// Path final del archivo destino (ya renombrado).
+    /// Path final del archivo destino (ya renombrado desde `.partial`).
     pub final_path: PathBuf,
 }
 
@@ -59,23 +65,15 @@ impl BlockWriter {
 
     /// Recibe bloques de `rx` y los escribe en `dest_path`.
     ///
-    /// - Si `config.use_partial_files`, escribe en `dest_path.partial`
-    ///   y renombra al final.
-    /// - Si `config.verify`, calcula hash del destino y lo compara con
-    ///   `source_hash`.
+    /// `source_hash` es el hash del origen calculado por el `BlockReader`.
+    /// Si se pasa `Some`, se verifica contra el hash calculado del destino.
     pub fn run(
         &self,
-        dest_path: &Path,
-        rx: Receiver<Block>,
+        dest_path:   &Path,
+        rx:          Receiver<Block>,
         source_hash: Option<&str>,
     ) -> Result<WriteResult> {
-        // ── Calcular path del archivo .partial ───────────────────────────────
-        // Estrategia: añadir ".partial" como sufijo al nombre completo,
-        // NO reemplazar la extensión existente.
-        //
-        // Correcto:   foto.jpg  → foto.jpg.partial
-        // Correcto:   Makefile  → Makefile.partial
-        // Incorrecto: foto.jpg  → foto.partial  (with_extension reemplaza)
+        // ── Calcular path del archivo .partial ────────────────────────────
         let partial_path = if self.config.use_partial_files {
             let file_name = dest_path
                 .file_name()
@@ -83,19 +81,19 @@ impl BlockWriter {
             let partial_name = format!("{}.partial", file_name.to_string_lossy());
             dest_path
                 .parent()
-                .unwrap_or(std::path::Path::new("."))
+                .unwrap_or(Path::new("."))
                 .join(partial_name)
         } else {
             dest_path.to_path_buf()
         };
 
-        // ── Asegurar que el directorio destino existe ─────────────────────────
+        // ── Asegurar que el directorio destino existe ─────────────────────
         if let Some(parent) = partial_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| CoreError::io(parent, e))?;
         }
 
-        // ── Crear archivo destino ─────────────────────────────────────────────
+        // ── Crear archivo destino ─────────────────────────────────────────
         let file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -115,10 +113,9 @@ impl BlockWriter {
 
         let mut bytes_written: u64 = 0;
 
-        // ── Loop de escritura ─────────────────────────────────────────────────
-        // `rx` se cierra automáticamente cuando el reader hace drop del sender.
+        // ── Loop de escritura ─────────────────────────────────────────────
+        // `rx` se cierra automáticamente cuando el reader hace drop del Sender.
         for block in &rx {
-            // Hash incremental del destino
             if let Some(ref mut h) = hasher {
                 h.update(&block.data);
             }
@@ -130,22 +127,20 @@ impl BlockWriter {
             bytes_written += block.len() as u64;
 
             tracing::trace!(
-                "Writer: bloque={} offset={} size={}B",
-                block.sequence,
-                block.offset,
-                block.len()
+                "Writer: seq={} offset={} size={}B",
+                block.sequence, block.offset, block.len()
             );
         }
 
-        // ── Flush explícito: garantiza que el buffer del OS se vacía ──────────
+        // ── Flush explícito ───────────────────────────────────────────────
         writer
             .flush()
             .map_err(|e| CoreError::write(&partial_path, e))?;
 
-        // Liberar el BufWriter para poder renombrar el archivo
+        // Liberar el BufWriter antes del rename
         drop(writer);
 
-        // ── Verificación de integridad ────────────────────────────────────────
+        // ── Verificación de integridad ────────────────────────────────────
         let dest_hash = hasher.map(|h| h.finalize());
 
         if let (Some(src), Some(dst)) = (source_hash, dest_hash.as_deref()) {
@@ -158,10 +153,10 @@ impl BlockWriter {
                     actual:   dst.to_string(),
                 });
             }
-            tracing::debug!("Verificación OK: {}", dest_hash.as_deref().unwrap_or(""));
+            tracing::debug!("Verificación OK: {}", dst);
         }
 
-        // ── Rename atómico ────────────────────────────────────────────────────
+        // ── Rename atómico ────────────────────────────────────────────────
         if self.config.use_partial_files {
             std::fs::rename(&partial_path, dest_path)
                 .map_err(|e| CoreError::rename(&partial_path, dest_path, e))?;
@@ -193,7 +188,12 @@ pub fn cleanup_partial_files(dest_root: &Path) -> std::io::Result<usize> {
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
-        if path.to_string_lossy().contains(".partial") {
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.ends_with(".partial"))
+            .unwrap_or(false)
+        {
             std::fs::remove_file(path)?;
             count += 1;
             tracing::warn!("Limpiado archivo partial huérfano: {}", path.display());
