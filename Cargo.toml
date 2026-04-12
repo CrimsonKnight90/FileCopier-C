@@ -4,7 +4,8 @@ members = [
     "crates/lib-core",
     "crates/lib-os",
     "crates/app-cli",
-    "crates/app-gui"
+    # app-gui se incorpora en Fase 2 (requiere Tauri y frontend configurado)
+    # "crates/app-gui",
 ]
 
 # Perfiles optimizados para el proyecto
@@ -24,7 +25,7 @@ debug     = true
 inherits  = "release"
 debug     = 1                # Permite flamegraphs sin perder optimizaciones
 
-# Dependencias compartidas en todo el workspace (evita duplicados)
+# Dependencias compartidas en todo el workspace (evita duplicados y versiones inconsistentes)
 [workspace.dependencies]
 # Async runtime
 tokio        = { version = "1.38", features = ["full"] }
@@ -51,7 +52,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # CLI
 clap         = { version = "4.5", features = ["derive", "env"] }
 
-# Tiempo
+# Tiempo (timestamps en checkpoints y telemetría)
 chrono       = { version = "0.4", features = ["serde"] }
 
 # Testing
