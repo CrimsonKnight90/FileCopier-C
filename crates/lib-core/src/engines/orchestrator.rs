@@ -178,11 +178,24 @@ impl Orchestrator {
             vec![]
         };
 
-        // Actualizar checkpoint con resultados del enjambre
+        // Actualizar checkpoint con resultados del enjambre.
+        // IMPORTANTE: el enjambre ya actualizó la telemetría internamente
+        // (add_bytes + complete_file / fail_file en copy_small_file).
+        // El orquestador solo actualiza el checkpoint, NO la telemetría.
         for (relative, result) in swarm_results {
             match result {
                 Ok(hash) => checkpoint.mark_completed(relative, hash),
-                Err(e)   => checkpoint.mark_failed(relative, e.to_string()),
+                Err(e)   => {
+                    tracing::warn!("Enjambre: falló {}: {e}", relative.display());
+                    checkpoint.mark_failed(relative, e.to_string());
+                }
+            }
+        }
+
+        // Persistir checkpoint tras completar todos los archivos pequeños.
+        if !checkpoint.completed.is_empty() || !checkpoint.failed.is_empty() {
+            if let Err(e) = checkpoint.save(&checkpoint_path) {
+                tracing::warn!("No se pudo guardar checkpoint post-enjambre: {e}");
             }
         }
 
@@ -202,6 +215,9 @@ impl Orchestrator {
 
             match block_engine.copy_file(&entry.source, &entry.dest) {
                 Ok(hash) => {
+                    // El motor de bloques NO actualiza telemetría internamente
+                    // (el reader solo cuenta bytes leídos). El orquestador es
+                    // responsable de marcar el archivo como completado.
                     telemetry.complete_file();
                     checkpoint.mark_completed(entry.relative.clone(), hash);
                 }

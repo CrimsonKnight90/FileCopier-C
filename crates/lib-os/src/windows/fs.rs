@@ -43,7 +43,6 @@ impl OsAdapter for WindowsAdapter {
 
     fn preallocate(&self, path: &Path, size: u64) -> Result<()> {
         use std::fs::OpenOptions;
-        use std::os::windows::fs::OpenOptionsExt;
         use std::os::windows::io::AsRawHandle;
 
         // Abrir el archivo existente para modificar su información de allocación.
@@ -79,51 +78,30 @@ impl OsAdapter for WindowsAdapter {
         };
 
         if result == 0 {
-            // SetFileInformationByHandle falló. Esto puede ocurrir en:
-            // - FAT32/exFAT (no soportan preallocación por MFT)
-            // - Unidades de red
-            // En estos casos, degradamos silenciosamente.
-            let err = std::io::Error::last_os_error();
+            // SetFileInformationByHandle falló. Ocurre en FAT32/exFAT y red.
+            // Degradamos silenciosamente: la copia continúa sin preallocación.
             tracing::warn!(
-                "Preallocación no soportada en '{}': {} (degradando silenciosamente)",
+                "Preallocación no soportada en '{}': {} (degradando)",
                 path.display(),
-                err
+                std::io::Error::last_os_error()
             );
-            // No retornamos error: la copia puede continuar sin preallocación.
         } else {
-            tracing::debug!(
-                "Preallocación OK: {} → {} bytes",
-                path.display(),
-                size
-            );
+            tracing::debug!("Preallocación OK: {} → {} bytes", path.display(), size);
         }
 
         Ok(())
     }
 
     fn copy_metadata(&self, source: &Path, dest: &Path) -> Result<()> {
-        use std::fs;
+        use std::os::windows::fs::MetadataExt;
 
-        // 1. Copiar timestamps via std (funciona en Windows)
-        let src_meta = fs::metadata(source)
+        let src_meta = std::fs::metadata(source)
             .map_err(|e| CoreError::io(source, e))?;
 
-        // Copiar modified time es lo más crítico para herramientas de backup
-        let modified = src_meta.modified()
-            .map_err(|e| CoreError::io(source, e))?;
-
-        // filetime solo está disponible como crate externo; usamos std para MVP.
-        // La API estable de Rust no expone SetFileTime directamente,
-        // así que usamos el método portable de std::fs.
-        //
-        // TODO Fase 2: usar `filetime` crate para acceso completo a atime/mtime/ctime.
-
-        // 2. Copiar atributos de archivo (hidden, read-only, etc.)
+        // Copiar atributos de archivo (hidden, read-only, system, archive).
+        // Excluimos: comprimido, encrypted, reparse_point (no tienen sentido en destino).
         let src_attrs = src_meta.file_attributes();
 
-        use std::os::windows::fs::MetadataExt;
-        // Atributos de Windows: filtramos los que no tienen sentido en destino
-        // (comprimido, encrypted, reparse_point se excluyen intencionalmente)
         const COPY_ATTRS: u32 = 0x00000001  // FILE_ATTRIBUTE_READONLY
             | 0x00000002  // FILE_ATTRIBUTE_HIDDEN
             | 0x00000004  // FILE_ATTRIBUTE_SYSTEM
@@ -133,9 +111,6 @@ impl OsAdapter for WindowsAdapter {
         let attrs_to_set = src_attrs & COPY_ATTRS;
 
         if attrs_to_set != 0 {
-            use std::os::windows::fs::OpenOptionsExt;
-            // SetFileAttributes via std no está disponible directamente;
-            // usamos la WinAPI.
             let dest_wide: Vec<u16> = {
                 use std::os::windows::ffi::OsStrExt;
                 std::ffi::OsStr::new(dest)
@@ -152,22 +127,19 @@ impl OsAdapter for WindowsAdapter {
             };
 
             if result == 0 {
-                let err = std::io::Error::last_os_error();
+                // No fatal: metadatos son best-effort en MVP
                 tracing::warn!(
                     "No se pudieron copiar atributos a '{}': {}",
                     dest.display(),
-                    err
+                    std::io::Error::last_os_error()
                 );
-                // No fatal: los metadatos son best-effort en MVP
             }
         }
 
-        tracing::trace!(
-            "Metadatos copiados: {} → {}",
-            source.display(),
-            dest.display()
-        );
+        // TODO Fase 2: copiar timestamps con crate `filetime`.
+        // La API estable de Rust no expone SetFileTime directamente.
 
+        tracing::trace!("Metadatos copiados: {} → {}", source.display(), dest.display());
         Ok(())
     }
 

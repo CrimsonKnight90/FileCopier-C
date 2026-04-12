@@ -14,13 +14,19 @@ tracing = { workspace = true }
 # Errores ergonómicos
 thiserror = { workspace = true }
 
-# Windows: acceso a WinAPI
+# Windows: acceso a WinAPI nativa
+# Usamos windows-sys (bindings puros sin overhead) en lugar de `windows` (más pesado).
+# Solo se compila en targets Windows.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
-    "Win32_Storage_FileSystem",
-    "Win32_Foundation",
-    "Win32_System_IO",
+windows-sys = { version = "0.59", features = [
+    "Win32_Storage_FileSystem",  # GetDriveTypeW, SetFileInformationByHandle, SetFileAttributesW
+    "Win32_Foundation",          # BOOL, HANDLE, tipos base
+    "Win32_System_IO",           # OVERLAPPED y estructuras de I/O
 ] }
+
+# Unix: libc para POSIX — posix_fallocate, futimens, lchown, signal
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [lib]
 name = "lib_os"

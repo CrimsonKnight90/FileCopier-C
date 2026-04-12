@@ -19,3 +19,7 @@ clap = { workspace = true }
 # Logging estructurado
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+# Unix: handler de señales POSIX (SIGINT) sin dependencias externas
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

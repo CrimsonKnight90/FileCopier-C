@@ -69,13 +69,22 @@ impl BlockWriter {
         rx: Receiver<Block>,
         source_hash: Option<&str>,
     ) -> Result<WriteResult> {
+        // ── Calcular path del archivo .partial ───────────────────────────────
+        // Estrategia: añadir ".partial" como sufijo al nombre completo,
+        // NO reemplazar la extensión existente.
+        //
+        // Correcto:   foto.jpg  → foto.jpg.partial
+        // Correcto:   Makefile  → Makefile.partial
+        // Incorrecto: foto.jpg  → foto.partial  (with_extension reemplaza)
         let partial_path = if self.config.use_partial_files {
-            dest_path.with_extension(format!(
-                "{}.partial",
-                dest_path.extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-            ))
+            let file_name = dest_path
+                .file_name()
+                .expect("dest_path debe tener nombre de archivo");
+            let partial_name = format!("{}.partial", file_name.to_string_lossy());
+            dest_path
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join(partial_name)
         } else {
             dest_path.to_path_buf()
         };

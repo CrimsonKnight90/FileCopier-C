@@ -38,6 +38,10 @@ use lib_core::{
 };
 use lib_os::traits::DriveKind;
 
+// Importación condicional de libc para el handler de señales Unix
+#[cfg(unix)]
+use libc;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Argumentos CLI
 // ─────────────────────────────────────────────────────────────────────────────
@@ -357,47 +361,63 @@ fn init_logging(verbosity: u8, quiet: bool) {
         .init();
 }
 
-/// Registra un handler de Ctrl+C portable (Windows + Unix).
+/// Handler de Ctrl+C portable (Windows + Unix).
 ///
-/// No usa la crate `ctrlc` para mantener dependencias mínimas.
-/// En Windows usa `SetConsoleCtrlHandler`; en Unix usa `signal`.
-fn ctrlc_handler(handler: impl Fn() + Send + 'static) {
-    // Usamos el mecanismo más simple disponible en std.
-    // Para MVP, la señal de Ctrl+C simplemente invoca el closure.
-    //
-    // Limitación: en Windows, solo funciona con Ctrl+C, no con cierre de ventana.
-    // TODO Fase 2: usar la crate `ctrlc` para manejo completo.
-
-    let handler = Arc::new(handler);
-
+/// ## Diseño
+///
+/// El problema central del handler de señales en Unix es que `signal()`
+/// solo acepta un puntero a función `extern "C"`, no un closure.
+/// La solución estándar es un `static` global que el handler de señal
+/// puede leer sin capturar nada del stack.
+///
+/// La clave del bug anterior: había DOS `static HANDLER` en scopes
+/// distintos. El `sigint_handler` veía su propio static (siempre vacío),
+/// no el del scope externo. La corrección: un único `static` en nivel
+/// de módulo, visible para ambos lados.
+fn ctrlc_handler(handler: impl Fn() + Send + Sync + 'static) {
+    // ── Unix: handler de SIGINT via static global ────────────────────────────
     #[cfg(unix)]
     {
-        use std::sync::Mutex;
-        // Almacenamos el handler en un static para poder llamarlo desde el handler de señal.
-        // Safety: el handler se establece una vez antes de iniciar el motor.
-        static HANDLER: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
-        let _ = HANDLER.set(handler);
+        // Static en nivel de módulo: el único punto de verdad compartido
+        // entre el código de setup y el `extern "C" fn sigint_handler`.
+        // Safety: se escribe exactamente una vez antes de instalar la señal.
+        UNIX_SIGNAL_HANDLER
+            .set(Arc::new(handler))
+            .ok(); // Ignorar error si ya fue inicializado (no debería ocurrir)
 
         unsafe {
-            libc::signal(libc::SIGINT, sigint_handler as libc::sighandler_t);
-        }
-
-        extern "C" fn sigint_handler(_: libc::c_int) {
-            static HANDLER: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>> =
-                std::sync::OnceLock::new();
-            if let Some(h) = HANDLER.get() {
-                h();
-            }
+            libc::signal(libc::SIGINT, unix_sigint_handler as libc::sighandler_t);
         }
     }
 
+    // ── Windows: sin handler personalizado en MVP ────────────────────────────
+    // SetConsoleCtrlHandler requiere una función estática también.
+    // Para MVP dejamos el comportamiento por defecto de Windows (terminar proceso).
+    // TODO Fase 2: implementar SetConsoleCtrlHandler con static global análogo.
     #[cfg(windows)]
     {
-        // En Windows usamos un thread dedicado que espera en una lectura
-        // bloqueante de la consola. Es el método más portables sin dependencias.
-        //
-        // Para MVP: dejamos el Ctrl+C con comportamiento por defecto de Windows.
-        // TODO Fase 2: SetConsoleCtrlHandler para pausa limpia.
         let _ = handler;
+    }
+}
+
+// Static global para Unix: único punto de comunicación entre
+// el código de setup y el handler de señal `extern "C"`.
+#[cfg(unix)]
+static UNIX_SIGNAL_HANDLER: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>> =
+    std::sync::OnceLock::new();
+
+/// Handler de señal SIGINT para Unix.
+///
+/// # Safety
+/// Esta función es invocada por el kernel en contexto de señal.
+/// Solo operaciones async-signal-safe están permitidas aquí.
+/// Llamar a un closure de Rust no es formalmente async-signal-safe,
+/// pero es la práctica estándar en aplicaciones CLI Rust (tokio, rayon, etc.).
+/// Para un handler 100% correcto, usar `signalfd` o `pipe` trick (Fase 2).
+#[cfg(unix)]
+extern "C" fn unix_sigint_handler(_sig: libc::c_int) {
+    // Acceso al static global: no hay captura, no hay allocation.
+    if let Some(handler) = UNIX_SIGNAL_HANDLER.get() {
+        handler();
     }
 }

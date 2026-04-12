@@ -148,13 +148,20 @@ async fn copy_small_file(
             .map_err(|e| CoreError::io(parent, e))?;
     }
 
-    // Escribir destino (con .partial si está habilitado)
+    // Escribir destino (con .partial si está habilitado).
+    // Se añade ".partial" como sufijo al nombre completo del archivo,
+    // NO se reemplaza la extensión existente.
+    //   foto.jpg  → foto.jpg.partial   ✓
+    //   Makefile  → Makefile.partial   ✓
     let partial_dest = if config.use_partial_files {
-        let ext = entry.dest
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-        entry.dest.with_extension(format!("{ext}.partial"))
+        let file_name = entry.dest
+            .file_name()
+            .expect("dest debe tener nombre de archivo");
+        let partial_name = format!("{}.partial", file_name.to_string_lossy());
+        entry.dest
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join(partial_name)
     } else {
         entry.dest.clone()
     };
