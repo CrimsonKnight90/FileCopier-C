@@ -2,29 +2,20 @@
 name        = "lib-os"
 version     = "0.1.0"
 edition     = "2021"
-description = "Abstracciones de sistema operativo para FileCopier-Rust: preallocación, rename atómico, permisos"
+description = "Abstracciones de sistema operativo para FileCopier-Rust"
 
 [dependencies]
-# Nuestro crate de errores y tipos base
-lib-core = { path = "../lib-core" }
-
-# Logging estructurado
-tracing = { workspace = true }
-
-# Errores ergonómicos
+lib-core  = { path = "../lib-core" }
+tracing   = { workspace = true }
 thiserror = { workspace = true }
 
-# Windows: acceso a WinAPI nativa
-# Usamos windows-sys (bindings puros sin overhead) en lugar de `windows` (más pesado).
-# Solo se compila en targets Windows.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",  # GetDriveTypeW, SetFileInformationByHandle, SetFileAttributesW
-    "Win32_Foundation",          # BOOL, HANDLE, tipos base
-    "Win32_System_IO",           # OVERLAPPED y estructuras de I/O
+    "Win32_Foundation",          # HANDLE, BOOL, INVALID_HANDLE_VALUE, CloseHandle
+    "Win32_System_IO",           # DeviceIoControl — necesario para IOCTL_STORAGE_QUERY_PROPERTY
 ] }
 
-# Unix: libc para POSIX — posix_fallocate, futimens, lchown, signal
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

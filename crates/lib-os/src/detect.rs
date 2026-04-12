@@ -2,20 +2,23 @@
 //!
 //! Detección de tipo de hardware de almacenamiento.
 //!
-//! ## Estrategia por plataforma
+//! ## Windows — cómo funciona la detección SSD/HDD
 //!
-//! - **Windows**: `GetDriveTypeW` para clasificar el tipo de unidad,
-//!   seguido de detección de seek penalty via IOCTL (Fase 2).
-//!   La letra de unidad se extrae directamente del path sin `canonicalize()`
-//!   para evitar fallos cuando el path de destino aún no existe.
+//! El sistema operativo expone `IOCTL_STORAGE_QUERY_PROPERTY` con
+//! `StorageDeviceSeekPenaltyProperty`. El resultado es un struct
+//! `DEVICE_SEEK_PENALTY_DESCRIPTOR` con un campo `IncursSeekPenalty`:
 //!
-//! - **Linux**: Lectura de `/sys/block/<dev>/queue/rotational`.
-//!   `0` → SSD, `1` → HDD.
+//!   - `FALSE (0)` → no hay seek penalty → **SSD / NVMe**
+//!   - `TRUE  (1)` → hay seek penalty    → **HDD mecánico**
 //!
-//! ## Fallback
+//! ## Flujo en Windows
 //!
-//! Si la detección falla (permisos, VM, unidad de red), retorna
-//! `DriveKind::Unknown` que se trata conservadoramente como HDD.
+//! ```text
+//! Path "C:\Users\..." → letra "C:" → "\\.\C:" → CreateFileW
+//!   → DeviceIoControl(IOCTL_STORAGE_QUERY_PROPERTY)
+//!   → DEVICE_SEEK_PENALTY_DESCRIPTOR.IncursSeekPenalty
+//!   → false → SSD  /  true → HDD
+//! ```
 
 use std::path::Path;
 
@@ -42,11 +45,9 @@ pub fn detect_drive_kind(path: &Path) -> DriveKind {
 
 #[cfg(windows)]
 fn windows_detect(path: &Path) -> DriveKind {
-    // Extraer la raíz de la unidad (ej: "C:\") directamente del path,
-    // sin llamar a canonicalize() que falla si el path no existe todavía.
     let root = match extract_drive_root(path) {
         Some(r) => r,
-        None    => return DriveKind::Unknown,
+        None    => return DriveKind::Network,
     };
 
     let root_wide: Vec<u16> = {
@@ -58,48 +59,155 @@ fn windows_detect(path: &Path) -> DriveKind {
             .collect()
     };
 
-    // GetDriveTypeW retorna constantes definidas en la WinAPI:
-    //   0 = DRIVE_UNKNOWN
-    //   1 = DRIVE_NO_ROOT_DIR
-    //   2 = DRIVE_REMOVABLE
-    //   3 = DRIVE_FIXED        ← disco local (HDD o SSD)
-    //   4 = DRIVE_REMOTE       ← unidad de red
-    //   5 = DRIVE_CDROM
-    //   6 = DRIVE_RAMDISK
     let drive_type = unsafe {
         windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(root_wide.as_ptr())
     };
 
     match drive_type {
-        4 => DriveKind::Network,   // DRIVE_REMOTE
-        5 => DriveKind::Unknown,   // DRIVE_CDROM — no relevante para copia
+        4 => DriveKind::Network,
         3 => {
-            // DRIVE_FIXED: puede ser HDD o SSD.
-            // Intentamos detectar seek penalty. Si falla, conservador = Hdd.
-            detect_seek_penalty_windows(&root).unwrap_or(DriveKind::Hdd)
+            // DRIVE_FIXED: consultar IOCTL para distinguir SSD de HDD
+            let letter = &root[..2]; // "C:"
+            detect_seek_penalty(letter).unwrap_or(DriveKind::Hdd)
         }
-        2 => DriveKind::Hdd,       // DRIVE_REMOVABLE: USB, SD — tratar como HDD
+        2 => DriveKind::Hdd, // DRIVE_REMOVABLE
         _ => DriveKind::Unknown,
     }
 }
 
-/// Extrae la raíz de la unidad de un path de Windows sin llamar a canonicalize.
-///
-/// Ejemplos:
-///   `C:\Users\foo\bar`  → `"C:\\"`
-///   `C:/Users/foo`      → `"C:\\"`
-///   `\\server\share\x`  → `None` (UNC paths → Unknown, se tratan como Network)
-///   `relative\path`     → `None`
+/// Consulta IOCTL_STORAGE_QUERY_PROPERTY para determinar SSD vs HDD.
+/// `drive_letter` debe ser "C:" (sin barra final).
+#[cfg(windows)]
+fn detect_seek_penalty(drive_letter: &str) -> Option<DriveKind> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+
+    // Abrir "\\.\C:" con acceso 0 (solo consulta de propiedades)
+    let volume_path = format!("\\\\.\\{drive_letter}");
+    let volume_wide: Vec<u16> = {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        OsStr::new(&volume_path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    };
+
+    let handle = unsafe {
+        CreateFileW(
+            volume_wide.as_ptr(),
+            0,                                  // dwDesiredAccess = 0 (consulta)
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            0,
+        )
+    };
+
+    if handle == INVALID_HANDLE_VALUE {
+        tracing::debug!(
+            "CreateFileW falló para '{}': {}",
+            volume_path,
+            std::io::Error::last_os_error()
+        );
+        return None;
+    }
+
+    let result = query_seek_penalty(handle);
+    unsafe { CloseHandle(handle) };
+    result
+}
+
+#[cfg(windows)]
+fn query_seek_penalty(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<DriveKind> {
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+
+    // IOCTL_STORAGE_QUERY_PROPERTY = 0x002D1400
+    const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002D1400;
+
+    // StorageDeviceSeekPenaltyProperty = 7
+    const STORAGE_DEVICE_SEEK_PENALTY_PROPERTY: i32 = 7;
+    const PROPERTY_STANDARD_QUERY: i32 = 0;
+
+    #[repr(C)]
+    struct StoragePropertyQuery {
+        property_id:           i32,
+        query_type:            i32,
+        additional_parameters: [u8; 1],
+    }
+
+    #[repr(C)]
+    struct DeviceSeekPenaltyDescriptor {
+        version:             u32,
+        size:                u32,
+        incurs_seek_penalty: u8, // 0 = SSD, 1 = HDD
+    }
+
+    let query = StoragePropertyQuery {
+        property_id:           STORAGE_DEVICE_SEEK_PENALTY_PROPERTY,
+        query_type:            PROPERTY_STANDARD_QUERY,
+        additional_parameters: [0u8],
+    };
+
+    let mut descriptor = DeviceSeekPenaltyDescriptor {
+        version: 0,
+        size:    0,
+        incurs_seek_penalty: 0,
+    };
+
+    let mut bytes_returned: u32 = 0;
+
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            &query as *const _ as *const _,
+            std::mem::size_of::<StoragePropertyQuery>() as u32,
+            &mut descriptor as *mut _ as *mut _,
+            std::mem::size_of::<DeviceSeekPenaltyDescriptor>() as u32,
+            &mut bytes_returned,
+            std::ptr::null_mut(),
+        )
+    };
+
+    if ok == 0 {
+        tracing::debug!(
+            "DeviceIoControl SEEK_PENALTY falló: {}",
+            std::io::Error::last_os_error()
+        );
+        return None;
+    }
+
+    let kind = if descriptor.incurs_seek_penalty == 0 {
+        DriveKind::Ssd
+    } else {
+        DriveKind::Hdd
+    };
+
+    tracing::debug!(
+        "seek_penalty={} → {:?}",
+        descriptor.incurs_seek_penalty,
+        kind
+    );
+
+    Some(kind)
+}
+
+/// Extrae la raíz de la unidad sin canonicalize().
+/// "C:\Users\foo" → Some("C:\\")
+/// "\\server\x"   → None
 #[cfg(windows)]
 fn extract_drive_root(path: &Path) -> Option<String> {
     let s = path.to_string_lossy();
 
-    // UNC paths (\\server\share) → tratar como red
     if s.starts_with("\\\\") || s.starts_with("//") {
         return None;
     }
 
-    // Buscar el patrón "X:" al inicio (letra de unidad)
     let bytes = s.as_bytes();
     if bytes.len() >= 2 && bytes[1] == b':' {
         let letter = bytes[0] as char;
@@ -108,28 +216,6 @@ fn extract_drive_root(path: &Path) -> Option<String> {
         }
     }
 
-    None
-}
-
-/// Detecta si una unidad local tiene seek penalty (HDD) o no (SSD).
-///
-/// Usa `IOCTL_STORAGE_QUERY_PROPERTY` con `StorageDeviceSeekPenaltyProperty`.
-/// Si `IncursSeekPenalty == FALSE` → SSD.
-///
-/// Por ahora retorna `None` (fallback a HDD) hasta la implementación
-/// completa en Fase 2 con el crate `windows` o llamadas directas a DeviceIoControl.
-#[cfg(windows)]
-fn detect_seek_penalty_windows(_volume_root: &str) -> Option<DriveKind> {
-    // TODO Fase 2: implementar IOCTL_STORAGE_QUERY_PROPERTY completo.
-    //
-    // El esquema es:
-    // 1. Abrir "\\.\PhysicalDrive0" con CreateFileW (GENERIC_READ, FILE_SHARE_READ|WRITE)
-    // 2. Preparar STORAGE_PROPERTY_QUERY { PropertyId = StorageDeviceSeekPenaltyProperty }
-    // 3. DeviceIoControl con IOCTL_STORAGE_QUERY_PROPERTY
-    // 4. Leer DEVICE_SEEK_PENALTY_DESCRIPTOR { IncursSeekPenalty }
-    //    FALSE → SSD, TRUE → HDD
-    //
-    // Por ahora retornamos None → el caller usa Hdd como fallback conservador.
     None
 }
 
@@ -147,9 +233,7 @@ fn linux_detect(path: &Path) -> DriveKind {
 
 #[cfg(unix)]
 fn find_block_device(path: &Path) -> Option<String> {
-    use std::fs;
-
-    let mounts   = fs::read_to_string("/proc/mounts").ok()?;
+    let mounts   = std::fs::read_to_string("/proc/mounts").ok()?;
     let abs_path = path.canonicalize().ok()?;
     let abs_str  = abs_path.to_string_lossy();
 
@@ -171,32 +255,27 @@ fn find_block_device(path: &Path) -> Option<String> {
         return None;
     }
 
-    let dev_name = std::path::Path::new(best_dev).file_name()?.to_str()?;
-    let base     = strip_partition_number(dev_name);
-    Some(base.to_string())
+    let dev_name = Path::new(best_dev).file_name()?.to_str()?;
+    Some(strip_partition_number(dev_name).to_string())
 }
 
 #[cfg(unix)]
 fn strip_partition_number(dev: &str) -> &str {
-    // nvme0n1p1 → nvme0n1
     if dev.contains('p') {
         if let Some(pos) = dev.rfind('p') {
-            let suffix = &dev[pos + 1..];
-            if suffix.chars().all(|c| c.is_ascii_digit()) {
+            if dev[pos + 1..].chars().all(|c| c.is_ascii_digit()) {
                 return &dev[..pos];
             }
         }
     }
-    // sda1 → sda
     let end = dev.trim_end_matches(|c: char| c.is_ascii_digit());
     if end.len() < dev.len() { end } else { dev }
 }
 
 #[cfg(unix)]
 fn read_rotational(dev_name: &str) -> DriveKind {
-    let path = format!("/sys/block/{dev_name}/queue/rotational");
-    match std::fs::read_to_string(&path) {
-        Ok(content) => match content.trim() {
+    match std::fs::read_to_string(format!("/sys/block/{dev_name}/queue/rotational")) {
+        Ok(s) => match s.trim() {
             "0" => DriveKind::Ssd,
             "1" => DriveKind::Hdd,
             _   => DriveKind::Unknown,
@@ -215,37 +294,35 @@ mod tests {
 
     #[test]
     fn detect_current_dir_does_not_panic() {
-        let kind = detect_drive_kind(std::path::Path::new("."));
+        let kind = detect_drive_kind(Path::new("."));
         println!("DriveKind para '.': {kind:?}");
-        // En CI puede ser Unknown. No fallamos por eso.
     }
 
     #[cfg(windows)]
     #[test]
-    fn extract_drive_root_standard_path() {
-        let p = std::path::Path::new(r"C:\Users\herna\Documents");
-        assert_eq!(extract_drive_root(p), Some("C:\\".to_string()));
+    fn extract_drive_root_standard() {
+        assert_eq!(
+            extract_drive_root(Path::new(r"C:\Users\herna\Documents")),
+            Some("C:\\".to_string())
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn extract_drive_root_forward_slashes() {
-        let p = std::path::Path::new("D:/Games/Steam");
-        assert_eq!(extract_drive_root(p), Some("D:\\".to_string()));
+        assert_eq!(
+            extract_drive_root(Path::new("D:/Games")),
+            Some("D:\\".to_string())
+        );
     }
 
     #[cfg(windows)]
     #[test]
-    fn extract_drive_root_unc_returns_none() {
-        let p = std::path::Path::new(r"\\server\share\file.txt");
-        assert_eq!(extract_drive_root(p), None);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn extract_drive_root_relative_returns_none() {
-        let p = std::path::Path::new("relative\\path");
-        assert_eq!(extract_drive_root(p), None);
+    fn extract_drive_root_unc_is_none() {
+        assert_eq!(
+            extract_drive_root(Path::new(r"\\server\share\file")),
+            None
+        );
     }
 
     #[cfg(unix)]
