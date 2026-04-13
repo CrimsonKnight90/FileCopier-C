@@ -11,9 +11,10 @@ thiserror = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
-    "Win32_Storage_FileSystem",  # GetDriveTypeW, SetFileInformationByHandle, SetFileAttributesW
+    "Win32_Storage_FileSystem",  # GetDriveTypeW, SetFileInformationByHandle, SetFileAttributesW, CreateFileW
     "Win32_Foundation",          # HANDLE, BOOL, INVALID_HANDLE_VALUE, CloseHandle
-    "Win32_System_IO",           # DeviceIoControl — necesario para IOCTL_STORAGE_QUERY_PROPERTY
+    "Win32_System_IO",           # DeviceIoControl
+    "Win32_Security",            # SECURITY_ATTRIBUTES (requerido por CreateFileW)
 ] }
 
 [target.'cfg(unix)'.dependencies]

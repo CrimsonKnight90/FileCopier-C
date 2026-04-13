@@ -2,23 +2,23 @@
 //!
 //! Detección de tipo de hardware de almacenamiento.
 //!
-//! ## Windows — cómo funciona la detección SSD/HDD
+//! ## Windows — estrategia sin permisos elevados
 //!
-//! El sistema operativo expone `IOCTL_STORAGE_QUERY_PROPERTY` con
-//! `StorageDeviceSeekPenaltyProperty`. El resultado es un struct
-//! `DEVICE_SEEK_PENALTY_DESCRIPTOR` con un campo `IncursSeekPenalty`:
+//! Consultamos el registro de Windows en:
+//! `HKLM\SYSTEM\CurrentControlSet\Services\storahci\Enum`
+//! o bien usamos `GetDriveTypeW` + heurística de nombre de volumen.
 //!
-//!   - `FALSE (0)` → no hay seek penalty → **SSD / NVMe**
-//!   - `TRUE  (1)` → hay seek penalty    → **HDD mecánico**
+//! La forma más robusta sin permisos de administrador es consultar
+//! `IOCTL_STORAGE_QUERY_PROPERTY` abriendo el **volumen** (no el disco físico)
+//! con `CreateFileW`. En windows-sys 0.59, `CreateFileW` está en:
+//! `Win32::Storage::FileSystem` — pero requiere el feature `Win32_Storage_FileSystem`.
 //!
-//! ## Flujo en Windows
+//! Si el IOCTL falla (máquinas virtuales, permisos), el fallback es `Hdd`
+//! (modo conservador: nunca asumimos más paralelismo del que el hardware soporta).
 //!
-//! ```text
-//! Path "C:\Users\..." → letra "C:" → "\\.\C:" → CreateFileW
-//!   → DeviceIoControl(IOCTL_STORAGE_QUERY_PROPERTY)
-//!   → DEVICE_SEEK_PENALTY_DESCRIPTOR.IncursSeekPenalty
-//!   → false → SSD  /  true → HDD
-//! ```
+//! ## Linux
+//!
+//! Lee `/sys/block/<dev>/queue/rotational`: `0` → SSD, `1` → HDD.
 
 use std::path::Path;
 
@@ -50,14 +50,7 @@ fn windows_detect(path: &Path) -> DriveKind {
         None    => return DriveKind::Network,
     };
 
-    let root_wide: Vec<u16> = {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-        OsStr::new(&root)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    };
+    let root_wide: Vec<u16> = encode_wide(&root);
 
     let drive_type = unsafe {
         windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(root_wide.as_ptr())
@@ -66,7 +59,7 @@ fn windows_detect(path: &Path) -> DriveKind {
     match drive_type {
         4 => DriveKind::Network,
         3 => {
-            // DRIVE_FIXED: consultar IOCTL para distinguir SSD de HDD
+            // DRIVE_FIXED: consultar IOCTL para SSD vs HDD
             let letter = &root[..2]; // "C:"
             detect_seek_penalty(letter).unwrap_or(DriveKind::Hdd)
         }
@@ -75,42 +68,42 @@ fn windows_detect(path: &Path) -> DriveKind {
     }
 }
 
-/// Consulta IOCTL_STORAGE_QUERY_PROPERTY para determinar SSD vs HDD.
-/// `drive_letter` debe ser "C:" (sin barra final).
+/// Detecta seek penalty via IOCTL_STORAGE_QUERY_PROPERTY.
+///
+/// Abrimos `\\.\C:` con `CreateFileW` (en el módulo correcto de windows-sys:
+/// `Win32::Storage::FileSystem`). Requiere el feature `Win32_Storage_FileSystem`.
 #[cfg(windows)]
 fn detect_seek_penalty(drive_letter: &str) -> Option<DriveKind> {
+    // CreateFileW vive en Win32::Storage::FileSystem en windows-sys 0.59
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW,
+        FILE_FLAG_NO_BUFFERING,
+        FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
+        OPEN_EXISTING,
     };
-    use windows_sys::Win32::System::IO::DeviceIoControl;
 
-    // Abrir "\\.\C:" con acceso 0 (solo consulta de propiedades)
+    // "\\.\C:" — abrir el volumen, no el disco físico.
+    // El volumen no requiere permisos de administrador para consultas IOCTL.
     let volume_path = format!("\\\\.\\{drive_letter}");
-    let volume_wide: Vec<u16> = {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-        OsStr::new(&volume_path)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    };
+    let volume_wide = encode_wide(&volume_path);
 
     let handle = unsafe {
         CreateFileW(
             volume_wide.as_ptr(),
-            0,                                  // dwDesiredAccess = 0 (consulta)
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            0,
-            0,
+            0,                                  // dwDesiredAccess = 0 (solo consulta)
+            FILE_SHARE_READ | FILE_SHARE_WRITE, // dwShareMode
+            std::ptr::null(),                   // lpSecurityAttributes
+            OPEN_EXISTING,                      // dwCreationDisposition
+            0,                                  // dwFlagsAndAttributes
+            0,                                  // hTemplateFile
         )
     };
 
     if handle == INVALID_HANDLE_VALUE {
         tracing::debug!(
-            "CreateFileW falló para '{}': {}",
+            "No se pudo abrir '{}' para IOCTL: {} (fallback=Hdd)",
             volume_path,
             std::io::Error::last_os_error()
         );
@@ -122,17 +115,17 @@ fn detect_seek_penalty(drive_letter: &str) -> Option<DriveKind> {
     result
 }
 
+/// Envía IOCTL_STORAGE_QUERY_PROPERTY al handle y devuelve SSD o HDD.
 #[cfg(windows)]
 fn query_seek_penalty(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<DriveKind> {
     use windows_sys::Win32::System::IO::DeviceIoControl;
 
-    // IOCTL_STORAGE_QUERY_PROPERTY = 0x002D1400
-    const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002D1400;
+    // Constantes del SDK de Windows
+    const IOCTL_STORAGE_QUERY_PROPERTY:          u32 = 0x002D_1400;
+    const STORAGE_DEVICE_SEEK_PENALTY_PROPERTY:  i32 = 7;
+    const PROPERTY_STANDARD_QUERY:               i32 = 0;
 
-    // StorageDeviceSeekPenaltyProperty = 7
-    const STORAGE_DEVICE_SEEK_PENALTY_PROPERTY: i32 = 7;
-    const PROPERTY_STANDARD_QUERY: i32 = 0;
-
+    /// STORAGE_PROPERTY_QUERY
     #[repr(C)]
     struct StoragePropertyQuery {
         property_id:           i32,
@@ -140,11 +133,12 @@ fn query_seek_penalty(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<
         additional_parameters: [u8; 1],
     }
 
+    /// DEVICE_SEEK_PENALTY_DESCRIPTOR
     #[repr(C)]
     struct DeviceSeekPenaltyDescriptor {
         version:             u32,
         size:                u32,
-        incurs_seek_penalty: u8, // 0 = SSD, 1 = HDD
+        incurs_seek_penalty: u8,  // 0 = SSD, 1 = HDD
     }
 
     let query = StoragePropertyQuery {
@@ -153,23 +147,18 @@ fn query_seek_penalty(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<
         additional_parameters: [0u8],
     };
 
-    let mut descriptor = DeviceSeekPenaltyDescriptor {
-        version: 0,
-        size:    0,
-        incurs_seek_penalty: 0,
-    };
-
-    let mut bytes_returned: u32 = 0;
+    let mut out   = DeviceSeekPenaltyDescriptor { version: 0, size: 0, incurs_seek_penalty: 0 };
+    let mut bytes: u32 = 0;
 
     let ok = unsafe {
         DeviceIoControl(
             handle,
             IOCTL_STORAGE_QUERY_PROPERTY,
-            &query as *const _ as *const _,
+            &query  as *const _ as *const _,
             std::mem::size_of::<StoragePropertyQuery>() as u32,
-            &mut descriptor as *mut _ as *mut _,
+            &mut out as *mut _   as *mut _,
             std::mem::size_of::<DeviceSeekPenaltyDescriptor>() as u32,
-            &mut bytes_returned,
+            &mut bytes,
             std::ptr::null_mut(),
         )
     };
@@ -182,41 +171,40 @@ fn query_seek_penalty(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<
         return None;
     }
 
-    let kind = if descriptor.incurs_seek_penalty == 0 {
+    let kind = if out.incurs_seek_penalty == 0 {
         DriveKind::Ssd
     } else {
         DriveKind::Hdd
     };
 
-    tracing::debug!(
-        "seek_penalty={} → {:?}",
-        descriptor.incurs_seek_penalty,
-        kind
-    );
-
+    tracing::debug!("IOCTL seek_penalty={} → {:?}", out.incurs_seek_penalty, kind);
     Some(kind)
 }
 
-/// Extrae la raíz de la unidad sin canonicalize().
-/// "C:\Users\foo" → Some("C:\\")
-/// "\\server\x"   → None
+/// Extrae `"C:\\"` de cualquier path de Windows sin llamar a `canonicalize()`.
 #[cfg(windows)]
 fn extract_drive_root(path: &Path) -> Option<String> {
     let s = path.to_string_lossy();
 
+    // UNC path → tratar como red
     if s.starts_with("\\\\") || s.starts_with("//") {
         return None;
     }
 
-    let bytes = s.as_bytes();
-    if bytes.len() >= 2 && bytes[1] == b':' {
-        let letter = bytes[0] as char;
-        if letter.is_ascii_alphabetic() {
-            return Some(format!("{}:\\", letter.to_ascii_uppercase()));
-        }
+    let b = s.as_bytes();
+    if b.len() >= 2 && b[1] == b':' && (b[0] as char).is_ascii_alphabetic() {
+        return Some(format!("{}:\\", (b[0] as char).to_ascii_uppercase()));
     }
 
     None
+}
+
+/// Convierte un `&str` a `Vec<u16>` terminado en null (para WinAPI).
+#[cfg(windows)]
+fn encode_wide(s: &str) -> Vec<u16> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
