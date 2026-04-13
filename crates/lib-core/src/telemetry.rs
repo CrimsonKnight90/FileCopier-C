@@ -31,6 +31,10 @@ pub struct CopyProgress {
     pub percent:                  f64,
     pub elapsed_secs:             f64,
     pub eta_secs:                 Option<f64>,
+    /// Nombre del archivo que se está copiando actualmente (si hay uno en progreso)
+    pub current_file:             Option<String>,
+    /// Progreso interno del archivo actual (0.0 - 1.0)
+    pub current_file_progress:    f64,
 }
 
 /// Contador atómico compartido entre todos los threads del motor.
@@ -43,6 +47,8 @@ pub struct TelemetrySink {
     start:               Instant,
     last_snapshot_bytes: Arc<AtomicU64>,
     last_snapshot_time:  Arc<std::sync::Mutex<Instant>>,
+    /// Archivo actual en proceso (para mostrar progreso interno)
+    current_file:        Arc<std::sync::Mutex<Option<(String, f64)>>>,
 }
 
 impl TelemetrySink {
@@ -57,6 +63,7 @@ impl TelemetrySink {
             start:               now,
             last_snapshot_bytes: Arc::new(AtomicU64::new(0)),
             last_snapshot_time:  Arc::new(std::sync::Mutex::new(now)),
+            current_file:        Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -75,11 +82,24 @@ impl TelemetrySink {
         self.failed_files.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Actualiza el archivo actual en proceso y su progreso interno (0.0 - 1.0)
+    pub fn set_current_file(&self, path: &std::path::Path, progress: f64) {
+        let mut current = self.current_file.lock().unwrap();
+        *current = Some((path.display().to_string(), progress.clamp(0.0, 1.0)));
+    }
+
+    /// Limpia el archivo actual cuando se completa
+    pub fn clear_current_file(&self) {
+        let mut current = self.current_file.lock().unwrap();
+        *current = None;
+    }
+
     pub fn handle(&self) -> TelemetryHandle {
         TelemetryHandle {
             copied_bytes:    Arc::clone(&self.copied_bytes),
             completed_files: Arc::clone(&self.completed_files),
             failed_files:    Arc::clone(&self.failed_files),
+            current_file:    Arc::clone(&self.current_file),
         }
     }
 
@@ -153,6 +173,15 @@ impl TelemetrySink {
             None
         };
 
+        // Archivo actual en proceso
+        let (current_file, current_file_progress) = {
+            let current = self.current_file.lock().unwrap();
+            match &*current {
+                Some((path, progress)) => (Some(path.clone()), *progress),
+                None => (None, 0.0),
+            }
+        };
+
         CopyProgress {
             total_bytes: self.total_bytes,
             copied_bytes: copied,
@@ -164,6 +193,8 @@ impl TelemetrySink {
             percent,
             elapsed_secs,
             eta_secs,
+            current_file,
+            current_file_progress,
         }
     }
 }
@@ -175,6 +206,7 @@ pub struct TelemetryHandle {
     copied_bytes:    Arc<AtomicU64>,
     completed_files: Arc<AtomicUsize>,
     failed_files:    Arc<AtomicUsize>,
+    current_file:    Arc<std::sync::Mutex<Option<(String, f64)>>>,
 }
 
 impl TelemetryHandle {
@@ -191,6 +223,18 @@ impl TelemetryHandle {
     #[inline]
     pub fn fail_file(&self) {
         self.failed_files.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Actualiza el archivo actual en proceso y su progreso interno (0.0 - 1.0)
+    pub fn set_current_file(&self, path: &std::path::Path, progress: f64) {
+        let mut current = self.current_file.lock().unwrap();
+        *current = Some((path.display().to_string(), progress.clamp(0.0, 1.0)));
+    }
+
+    /// Limpia el archivo actual cuando se completa
+    pub fn clear_current_file(&self) {
+        let mut current = self.current_file.lock().unwrap();
+        *current = None;
     }
 }
 

@@ -208,6 +208,19 @@ impl Orchestrator {
         );
 
         for entry in large_files {
+            // Verificar cancelación ANTES de procesar cada archivo grande
+            if self.flow.is_cancelled() {
+                tracing::info!(
+                    "Cancelación detectada: saltando archivo pendiente {}",
+                    entry.relative.display()
+                );
+                checkpoint.mark_failed(
+                    entry.relative.clone(),
+                    "Cancelado por el usuario".to_string()
+                );
+                continue;
+            }
+
             tracing::info!(
                 "Copiando (bloques): {} ({:.1} MB)",
                 entry.source.display(),
