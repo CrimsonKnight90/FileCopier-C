@@ -4,84 +4,48 @@
 //!
 //! ## Diseño de telemetría diferenciada
 //!
-//! El motor dual produce dos tipos de métricas distintas:
+//! - Motor de bloques → MB/s (throughput de bytes)
+//! - Motor de enjambre → archivos/s (IOPS de metadatos)
 //!
-//! - **Motor de bloques** → `MB/s` (throughput de bytes)
-//! - **Motor de enjambre** → `archivos/s` (IOPS de metadatos)
-//!
-//! Ambas métricas se consolidan en `CopyProgress`, que es la única
-//! estructura que el frontend (CLI o GUI Tauri) necesita observar.
+//! Ambas métricas se consolidan en `CopyProgress`.
 //!
 //! ## Thread-safety
 //!
-//! `TelemetrySink` usa `Arc<Mutex<...>>` internamente para permitir
-//! actualización desde múltiples threads del pipeline sin contención excesiva.
-//! Las lecturas son baratas (snapshot atómico).
+//! `TelemetrySink` usa contadores atómicos para actualizaciones lock-free
+//! en el hot path. Las lecturas (snapshots) ocurren solo desde el thread de UI.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 /// Snapshot inmutable del progreso en un instante dado.
-/// Esta es la estructura que el frontend consume.
 #[derive(Debug, Clone)]
 pub struct CopyProgress {
-    /// Bytes totales a copiar (suma de todos los archivos).
-    pub total_bytes: u64,
-
-    /// Bytes ya copiados hasta este momento.
-    pub copied_bytes: u64,
-
-    /// Número total de archivos en la operación.
-    pub total_files: usize,
-
-    /// Archivos completados (copia + verificación si aplica).
-    pub completed_files: usize,
-
-    /// Archivos que fallaron (no bloqueantes: el motor continúa).
-    pub failed_files: usize,
-
-    /// Throughput actual del motor de bloques en bytes/segundo.
+    pub total_bytes:              u64,
+    pub copied_bytes:             u64,
+    pub total_files:              usize,
+    pub completed_files:          usize,
+    pub failed_files:             usize,
     pub throughput_bytes_per_sec: f64,
-
-    /// Tasa actual del motor de enjambre en archivos/segundo.
-    pub files_per_sec: f64,
-
-    /// Porcentaje de progreso global [0.0, 100.0].
-    pub percent: f64,
-
-    /// Tiempo transcurrido desde el inicio de la operación.
-    pub elapsed_secs: f64,
-
-    /// Estimación de tiempo restante en segundos. `None` si no hay datos.
-    pub eta_secs: Option<f64>,
+    pub files_per_sec:            f64,
+    pub percent:                  f64,
+    pub elapsed_secs:             f64,
+    pub eta_secs:                 Option<f64>,
 }
 
 /// Contador atómico compartido entre todos los threads del motor.
-///
-/// Usa `AtomicU64` y `AtomicUsize` para actualizaciones lock-free
-/// en el hot path. Los snapshots se calculan bajo demanda.
 pub struct TelemetrySink {
-    // ── Contadores de bytes ───────────────────────────────────────────────────
-    total_bytes:    u64,
-    copied_bytes:   Arc<AtomicU64>,
-
-    // ── Contadores de archivos ────────────────────────────────────────────────
-    total_files:    usize,
-    completed_files: Arc<AtomicUsize>,
-    failed_files:    Arc<AtomicUsize>,
-
-    // ── Medición de tiempo ────────────────────────────────────────────────────
-    start:          Instant,
-
-    // ── Ventana deslizante para throughput ────────────────────────────────────
-    // Guardamos el último snapshot para calcular throughput incremental.
+    total_bytes:         u64,
+    copied_bytes:        Arc<AtomicU64>,
+    total_files:         usize,
+    completed_files:     Arc<AtomicUsize>,
+    failed_files:        Arc<AtomicUsize>,
+    start:               Instant,
     last_snapshot_bytes: Arc<AtomicU64>,
     last_snapshot_time:  Arc<std::sync::Mutex<Instant>>,
 }
 
 impl TelemetrySink {
-    /// Crea un nuevo sink con los totales conocidos antes de iniciar.
     pub fn new(total_bytes: u64, total_files: usize) -> Self {
         let now = Instant::now();
         Self {
@@ -96,31 +60,21 @@ impl TelemetrySink {
         }
     }
 
-    /// Registra que se copiaron `bytes` adicionales.
-    ///
-    /// Llamado desde el writer thread en el hot path. Debe ser lo más
-    /// barato posible → `Relaxed` ordering es suficiente aquí porque
-    /// la consistencia entre threads se garantiza cuando se llama a `snapshot()`.
     #[inline]
     pub fn add_bytes(&self, bytes: u64) {
         self.copied_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
-    /// Registra que un archivo fue completado exitosamente.
     #[inline]
     pub fn complete_file(&self) {
         self.completed_files.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Registra que un archivo falló.
     #[inline]
     pub fn fail_file(&self) {
         self.failed_files.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Retorna un handle clonado para enviar a otro thread.
-    ///
-    /// Todos los handles comparten los mismos contadores atómicos.
     pub fn handle(&self) -> TelemetryHandle {
         TelemetryHandle {
             copied_bytes:    Arc::clone(&self.copied_bytes),
@@ -131,59 +85,67 @@ impl TelemetrySink {
 
     /// Calcula un snapshot inmutable del progreso actual.
     ///
-    /// Este método es más caro (calcula throughput incremental con lock),
-    /// pero se llama solo desde el thread de UI (~1 Hz o menos).
+    /// Llamado ~2 Hz desde el thread de UI. Calcula throughput incremental
+    /// usando una ventana deslizante para evitar lecturas falsas de 0 B/s
+    /// cuando el enjambre termina antes del primer tick del reporter.
     pub fn snapshot(&self) -> CopyProgress {
-        // Leer contadores con ordering más fuerte para snapshot consistente
-        let copied   = self.copied_bytes.load(Ordering::Acquire);
+        let copied    = self.copied_bytes.load(Ordering::Acquire);
         let completed = self.completed_files.load(Ordering::Acquire);
         let failed    = self.failed_files.load(Ordering::Acquire);
 
-        let elapsed = self.start.elapsed();
+        let elapsed      = self.start.elapsed();
         let elapsed_secs = elapsed.as_secs_f64();
 
-        // Throughput global (bytes/s desde el inicio)
+        // Velocidad global desde el inicio (siempre disponible si hay bytes)
         let global_bps = if elapsed_secs > 0.0 {
             copied as f64 / elapsed_secs
         } else {
             0.0
         };
 
-        // Throughput incremental (ventana deslizante)
+        // Velocidad incremental (ventana deslizante para suavizar picos)
         let throughput_bytes_per_sec = {
-            let mut last_time = self.last_snapshot_time.lock().unwrap();
-            let last_bytes    = self.last_snapshot_bytes.load(Ordering::Relaxed);
-            let delta_bytes   = copied.saturating_sub(last_bytes);
-            let delta_secs    = last_time.elapsed().as_secs_f64();
+            let mut last_time  = self.last_snapshot_time.lock().unwrap();
+            let last_bytes     = self.last_snapshot_bytes.load(Ordering::Relaxed);
+            let delta_bytes    = copied.saturating_sub(last_bytes);
+            let delta_secs     = last_time.elapsed().as_secs_f64();
 
-            let rate = if delta_secs > 0.01 {
+            // Usar velocidad incremental si el delta es significativo.
+            // Si el delta es muy pequeño (motor terminó entre ticks) o cero,
+            // caer al global para evitar mostrar 0 B/s o 46 MB/s fijo.
+            let rate = if delta_secs > 0.01 && delta_bytes > 0 {
                 delta_bytes as f64 / delta_secs
-            } else {
+            } else if elapsed_secs > 0.1 {
+                // Fallback: velocidad global acumulada desde el inicio.
+                // Evita el bug de "46.2 MB/s" fijo o "0 B/s" cuando el
+                // enjambre completa archivos fuera del tick del reporter.
                 global_bps
+            } else {
+                0.0
             };
 
-            // Actualizar ventana
+            // Actualizar ventana deslizante
             self.last_snapshot_bytes.store(copied, Ordering::Relaxed);
             *last_time = Instant::now();
 
             rate
         };
 
-        // Files/s: archivos completados / tiempo transcurrido
+        // Archivos/s
         let files_per_sec = if elapsed_secs > 0.0 {
             completed as f64 / elapsed_secs
         } else {
             0.0
         };
 
-        // Porcentaje
+        // Porcentaje global
         let percent = if self.total_bytes > 0 {
-            (copied as f64 / self.total_bytes as f64) * 100.0
+            (copied as f64 / self.total_bytes as f64 * 100.0).min(100.0)
         } else {
             100.0
         };
 
-        // ETA
+        // ETA basada en velocidad incremental
         let eta_secs = if throughput_bytes_per_sec > 0.0 && copied < self.total_bytes {
             let remaining = self.total_bytes - copied;
             Some(remaining as f64 / throughput_bytes_per_sec)
@@ -192,11 +154,11 @@ impl TelemetrySink {
         };
 
         CopyProgress {
-            total_bytes:             self.total_bytes,
-            copied_bytes:            copied,
-            total_files:             self.total_files,
-            completed_files:         completed,
-            failed_files:            failed,
+            total_bytes: self.total_bytes,
+            copied_bytes: copied,
+            total_files: self.total_files,
+            completed_files: completed,
+            failed_files: failed,
             throughput_bytes_per_sec,
             files_per_sec,
             percent,
@@ -206,10 +168,8 @@ impl TelemetrySink {
     }
 }
 
-/// Handle ligero que puede clonarse y enviarse a threads del motor.
-///
-/// Solo expone las operaciones de escritura (add_bytes, complete_file, fail_file).
-/// El thread de UI mantiene el `TelemetrySink` original para leer snapshots.
+/// Handle ligero cloneable para threads del motor.
+/// Solo expone operaciones de escritura — el sink original lee los snapshots.
 #[derive(Clone)]
 pub struct TelemetryHandle {
     copied_bytes:    Arc<AtomicU64>,
@@ -234,16 +194,18 @@ impl TelemetryHandle {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Formatters
+// ─────────────────────────────────────────────────────────────────────────────
+
 impl CopyProgress {
-    /// Formatea `throughput_bytes_per_sec` en formato humano (KB/s, MB/s, GB/s).
     pub fn throughput_human(&self) -> String {
         format_bytes_per_sec(self.throughput_bytes_per_sec)
     }
 
-    /// Formatea el ETA en formato humano (e.g. "2m 30s").
     pub fn eta_human(&self) -> String {
         match self.eta_secs {
-            None => "—".into(),
+            None    => "—".into(),
             Some(s) => format_duration(s),
         }
     }
@@ -254,24 +216,15 @@ fn format_bytes_per_sec(bps: f64) -> String {
     const MB: f64 = KB * 1024.0;
     const GB: f64 = MB * 1024.0;
 
-    if bps >= GB {
-        format!("{:.2} GB/s", bps / GB)
-    } else if bps >= MB {
-        format!("{:.1} MB/s", bps / MB)
-    } else if bps >= KB {
-        format!("{:.0} KB/s", bps / KB)
-    } else {
-        format!("{:.0} B/s", bps)
-    }
+    if bps >= GB      { format!("{:.2} GB/s", bps / GB) }
+    else if bps >= MB { format!("{:.1} MB/s", bps / MB) }
+    else if bps >= KB { format!("{:.0} KB/s", bps / KB) }
+    else              { format!("{:.0} B/s",  bps)      }
 }
 
 fn format_duration(secs: f64) -> String {
     let s = secs as u64;
-    if s < 60 {
-        format!("{s}s")
-    } else if s < 3600 {
-        format!("{}m {}s", s / 60, s % 60)
-    } else {
-        format!("{}h {}m", s / 3600, (s % 3600) / 60)
-    }
+    if s < 60        { format!("{s}s") }
+    else if s < 3600 { format!("{}m {}s", s / 60, s % 60) }
+    else             { format!("{}h {}m", s / 3600, (s % 3600) / 60) }
 }

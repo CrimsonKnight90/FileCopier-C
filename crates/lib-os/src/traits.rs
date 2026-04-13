@@ -6,14 +6,11 @@
 //!
 //! Todo lo que depende del sistema operativo pasa por este trait.
 //! `lib-core` no tiene `#[cfg(windows)]` ni `#[cfg(unix)]` en ningún lugar.
-//!
-//! Las operaciones aquí documentadas tienen semántica bien definida
-//! en ambas plataformas, aunque la implementación difiera.
 
 use std::path::Path;
 use lib_core::error::Result;
 
-/// Información sobre el tipo de dispositivo de almacenamiento.
+/// Tipo de dispositivo de almacenamiento.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriveKind {
     /// Disco de estado sólido (SATA SSD o NVMe).
@@ -22,7 +19,7 @@ pub enum DriveKind {
     Hdd,
     /// Unidad de red (NAS, SMB, NFS).
     Network,
-    /// No se pudo determinar (fallback conservador = HDD).
+    /// No se pudo determinar — fallback conservador = HDD.
     Unknown,
 }
 
@@ -41,42 +38,55 @@ impl DriveKind {
 /// Estrategia de copia recomendada para un par origen/destino.
 #[derive(Debug, Clone, Copy)]
 pub struct CopyStrategy {
-    /// Tipo del dispositivo origen.
     pub source_kind: DriveKind,
-    /// Tipo del dispositivo destino.
     pub dest_kind:   DriveKind,
-    /// Número de workers recomendado para el enjambre.
+
+    /// Concurrencia del enjambre sin verificación de hash.
     pub recommended_swarm_concurrency: usize,
+
+    /// Concurrencia del enjambre CON --verify activo.
+    ///
+    /// Con --verify cada tarea hace: leer + hash origen + escribir + hash destino.
+    /// En SSD con 128 tareas concurrentes esto satura el page cache del OS
+    /// y produce cache misses masivos → rendimiento peor que con menos tareas.
+    /// Benchmarks reales muestran que 32 tareas es el punto óptimo para SSD+hash.
+    pub recommended_swarm_concurrency_verify: usize,
+
     /// Tamaño de bloque recomendado en bytes.
     pub recommended_block_size: usize,
 }
 
 impl CopyStrategy {
     /// Calcula la estrategia óptima según origen y destino.
+    ///
+    /// ## Heurísticas basadas en benchmarks
+    ///
+    /// | Escenario  | Sin verify | Con verify | Bloque | Razón                            |
+    /// |------------|-----------|------------|--------|----------------------------------|
+    /// | HDD→HDD    | 1         | 1          | 8 MB   | Monohilo: evita seek doble       |
+    /// | SSD→HDD    | 4         | 4          | 8 MB   | HDD es cuello de botella         |
+    /// | HDD→SSD    | 1         | 1          | 4 MB   | HDD es cuello de botella         |
+    /// | SSD→SSD    | 128       | 32         | 4 MB   | 128+verify satura page cache     |
+    /// | *→Network  | 8         | 8          | 16 MB  | Latencia de red domina           |
+    /// | Network→*  | 16        | 16         | 4 MB   | Latencia de red domina           |
+    /// | Unknown    | 4         | 4          | 4 MB   | Conservador                      |
     pub fn compute(source_kind: DriveKind, dest_kind: DriveKind) -> Self {
-        // Heurísticas basadas en benchmarks empíricos:
-        //
-        // HDD→HDD: monohilo, bloques grandes (reduce seeks en origen Y destino)
-        // SSD→HDD: ráfagas moderadas (HDD es el cuello de botella)
-        // HDD→SSD: monohilo (HDD es el cuello de botella)
-        // SSD→SSD: máximo paralelismo
-        // *→Network: conservador (latencia de red, no saturar buffer)
-
-        let (concurrency, block_size) = match (source_kind, dest_kind) {
-            (DriveKind::Hdd,     DriveKind::Hdd)     => (1,   8 * 1024 * 1024),
-            (DriveKind::Ssd,     DriveKind::Hdd)     => (4,   8 * 1024 * 1024),
-            (DriveKind::Hdd,     DriveKind::Ssd)     => (1,   4 * 1024 * 1024),
-            (DriveKind::Ssd,     DriveKind::Ssd)     => (128, 4 * 1024 * 1024),
-            (_,                  DriveKind::Network)  => (8,  16 * 1024 * 1024),
-            (DriveKind::Network, _)                   => (16,  4 * 1024 * 1024),
-            (DriveKind::Unknown, _) | (_, DriveKind::Unknown) => (4, 4 * 1024 * 1024),
+        let (concurrency, concurrency_verify, block_size) = match (source_kind, dest_kind) {
+            (DriveKind::Hdd,     DriveKind::Hdd)     => (1,   1,   8 * 1024 * 1024),
+            (DriveKind::Ssd,     DriveKind::Hdd)     => (4,   4,   8 * 1024 * 1024),
+            (DriveKind::Hdd,     DriveKind::Ssd)     => (1,   1,   4 * 1024 * 1024),
+            (DriveKind::Ssd,     DriveKind::Ssd)     => (128, 32,  4 * 1024 * 1024),
+            (_,                  DriveKind::Network)  => (8,   8,  16 * 1024 * 1024),
+            (DriveKind::Network, _)                   => (16,  16,  4 * 1024 * 1024),
+            _                                         => (4,   4,   4 * 1024 * 1024),
         };
 
         Self {
             source_kind,
             dest_kind,
-            recommended_swarm_concurrency: concurrency,
-            recommended_block_size:        block_size,
+            recommended_swarm_concurrency:        concurrency,
+            recommended_swarm_concurrency_verify: concurrency_verify,
+            recommended_block_size:               block_size,
         }
     }
 }
@@ -101,22 +111,13 @@ pub trait OsAdapter: Send + Sync {
 
     /// Pre-alloca espacio en disco para `path` de `size` bytes.
     ///
-    /// ## Semántica
-    ///
-    /// - **Windows**: usa `SetFileInformationByHandle` con `FileAllocationInfo`.
-    ///   Extiende el archivo sin escribir ceros, reduciendo fragmentación.
-    /// - **Linux**: usa `posix_fallocate()`. No escribe datos, solo reserva bloques.
-    ///
     /// Si el sistema de archivos no soporta preallocación (FAT32, exFAT),
-    /// este método retorna `Ok(())` sin error (degradación suave).
+    /// retorna `Ok(())` sin error (degradación suave).
     fn preallocate(&self, path: &Path, size: u64) -> Result<()>;
 
     // ── Permisos y metadatos ──────────────────────────────────────────────────
 
     /// Copia los permisos y timestamps del origen al destino.
-    ///
-    /// En Windows: copia ACLs, atributos (hidden, read-only, etc.) y timestamps.
-    /// En Unix:    copia `mode`, `uid`, `gid` y `atime`/`mtime`.
     fn copy_metadata(&self, source: &Path, dest: &Path) -> Result<()>;
 
     // ── Nombre de la plataforma (para logging) ────────────────────────────────

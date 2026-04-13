@@ -19,6 +19,10 @@ use lib_core::{
 };
 use lib_os::traits::DriveKind;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Argumentos CLI
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// Motor de copia de alto rendimiento con verificación de integridad
 #[derive(Parser, Debug)]
 #[command(
@@ -82,6 +86,10 @@ struct Cli {
     quiet: bool,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Main
+// ─────────────────────────────────────────────────────────────────────────────
+
 fn main() {
     let cli = Cli::parse();
     init_logging(cli.verbosity, cli.quiet);
@@ -93,11 +101,13 @@ fn main() {
 }
 
 fn run(cli: Cli) -> lib_core::error::Result<()> {
+    // ── 1. Validar paths ──────────────────────────────────────────────────────
     if !cli.source.exists() {
         eprintln!("❌ El origen no existe: {}", cli.source.display());
         std::process::exit(2);
     }
 
+    // ── 2. Construir configuración ────────────────────────────────────────────
     let algorithm = Algorithm::from_str(&cli.hasher).unwrap_or_else(|e| {
         eprintln!("⚠  {e}. Usando blake3 por defecto.");
         Algorithm::Blake3
@@ -114,6 +124,7 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
         use_partial_files:       !cli.no_partial,
     };
 
+    // ── 3. Detección de hardware ──────────────────────────────────────────────
     if !cli.no_detect {
         let adapter  = lib_os::platform_adapter();
         let strategy = adapter.compute_strategy(&cli.source, &cli.dest);
@@ -124,24 +135,34 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
             strategy.dest_kind
         );
 
+        // Aplicar heurísticas solo si el usuario dejó los valores por defecto.
         if cli.swarm_limit == 128 {
-            config.swarm_concurrency = strategy.recommended_swarm_concurrency;
+            // Con --verify activo usamos concurrencia reducida para evitar
+            // saturar el page cache del OS con demasiadas tareas de hash
+            // concurrentes. En SSD→SSD: 128→32 tareas con verify.
+            config.swarm_concurrency = if cli.verify {
+                strategy.recommended_swarm_concurrency_verify
+            } else {
+                strategy.recommended_swarm_concurrency
+            };
         }
         if cli.block_size == 4 {
             config.block_size_bytes = strategy.recommended_block_size;
         }
 
         if !cli.quiet {
-            print_hardware_info(&strategy);
+            print_hardware_info(&strategy, cli.verify);
         }
     }
 
+    // ── 4. Validar configuración ──────────────────────────────────────────────
     config.validate()?;
 
     if !cli.quiet {
         print_config_banner(&config, &cli.source, &cli.dest);
     }
 
+    // ── 5. Control de flujo (Ctrl+C) ──────────────────────────────────────────
     let flow             = FlowControl::new();
     let flow_for_handler = flow.clone();
     let ctrl_c_count     = Arc::new(AtomicBool::new(false));
@@ -158,6 +179,7 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
         }
     });
 
+    // ── 6. Ejecutar motor ─────────────────────────────────────────────────────
     let start = Instant::now();
     let quiet = cli.quiet;
 
@@ -172,6 +194,7 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
     let orchestrator = Orchestrator::new(config, flow);
     let result       = orchestrator.run(&cli.source, &cli.dest, Some(on_progress))?;
 
+    // ── 7. Resumen final ──────────────────────────────────────────────────────
     if !cli.quiet {
         println!();
     }
@@ -184,6 +207,10 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
 
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UI helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
 fn print_config_banner(
     config: &EngineConfig,
@@ -211,19 +238,25 @@ fn print_config_banner(
     println!();
 }
 
-fn print_hardware_info(strategy: &lib_os::traits::CopyStrategy) {
+fn print_hardware_info(strategy: &lib_os::traits::CopyStrategy, verify: bool) {
     let label = |k: DriveKind| match k {
         DriveKind::Ssd     => "SSD/NVMe",
         DriveKind::Hdd     => "HDD",
         DriveKind::Network => "Red",
         DriveKind::Unknown => "Desconocido",
     };
+    let concurrency = if verify {
+        strategy.recommended_swarm_concurrency_verify
+    } else {
+        strategy.recommended_swarm_concurrency
+    };
     println!(
-        "  Hardware: {} → {}  |  enjambre={} bloque={}MB",
+        "  Hardware: {} → {}  |  enjambre={} bloque={}MB{}",
         label(strategy.source_kind),
         label(strategy.dest_kind),
-        strategy.recommended_swarm_concurrency,
+        concurrency,
         strategy.recommended_block_size / 1024 / 1024,
+        if verify { "  [verify: concurrencia reducida]" } else { "" },
     );
 }
 
@@ -275,6 +308,10 @@ fn print_summary(
         println!("    Revisa el checkpoint para detalles.");
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Logging y señales
+// ─────────────────────────────────────────────────────────────────────────────
 
 fn init_logging(verbosity: u8, quiet: bool) {
     use tracing_subscriber::EnvFilter;
