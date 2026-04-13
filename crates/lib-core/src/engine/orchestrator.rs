@@ -208,13 +208,15 @@ impl Orchestrator {
         );
 
         for entry in large_files {
-            // Comprobar cancelación antes de cada archivo grande.
-            // Si se canceló durante el enjambre, no procesamos más archivos.
+            // Verificar cancelación ANTES de procesar cada archivo grande
             if self.flow.is_cancelled() {
-                telemetry.fail_file();
+                tracing::info!(
+                    "Cancelación detectada: saltando archivo pendiente {}",
+                    entry.relative.display()
+                );
                 checkpoint.mark_failed(
                     entry.relative.clone(),
-                    "Cancelado por el usuario".into(),
+                    "Cancelado por el usuario".to_string()
                 );
                 continue;
             }
