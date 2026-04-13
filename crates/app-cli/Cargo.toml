@@ -9,17 +9,20 @@ name = "filecopier"
 path = "src/main.rs"
 
 [dependencies]
-# Nuestros crates
 lib-core = { path = "../lib-core" }
 lib-os   = { path = "../lib-os"   }
 
-# CLI profesional con derive macros
-clap = { workspace = true }
-
-# Logging estructurado
+clap               = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-# Unix: handler de señales POSIX (SIGINT) sin dependencias externas
+# Windows: SetConsoleCtrlHandler para pausa limpia con Ctrl+C
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Console",   # SetConsoleCtrlHandler, CTRL_C_EVENT, etc.
+    "Win32_Foundation",       # BOOL
+] }
+
+# Unix: handler de señales POSIX (SIGINT)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

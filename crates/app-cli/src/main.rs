@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -135,11 +135,7 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
             strategy.dest_kind
         );
 
-        // Aplicar heurísticas solo si el usuario dejó los valores por defecto.
         if cli.swarm_limit == 128 {
-            // Con --verify activo usamos concurrencia reducida para evitar
-            // saturar el page cache del OS con demasiadas tareas de hash
-            // concurrentes. En SSD→SSD: 128→32 tareas con verify.
             config.swarm_concurrency = if cli.verify {
                 strategy.recommended_swarm_concurrency_verify
             } else {
@@ -163,21 +159,13 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
     }
 
     // ── 5. Control de flujo (Ctrl+C) ──────────────────────────────────────────
-    let flow             = FlowControl::new();
-    let flow_for_handler = flow.clone();
-    let ctrl_c_count     = Arc::new(AtomicBool::new(false));
-    let count_clone      = Arc::clone(&ctrl_c_count);
+    let flow = FlowControl::new();
 
-    ctrlc_handler(move || {
-        if count_clone.load(Ordering::Relaxed) {
-            eprintln!("\n⚠  Segunda interrupción: cancelando...");
-            flow_for_handler.cancel();
-        } else {
-            count_clone.store(true, Ordering::Relaxed);
-            eprintln!("\n⏸  Pausa solicitada. Presiona Ctrl+C de nuevo para cancelar.");
-            flow_for_handler.pause();
-        }
-    });
+    // Contador de señales: 1 = pausar, 2+ = cancelar.
+    // Usar AtomicU32 en lugar de AtomicBool permite distinguir el segundo Ctrl+C.
+    let signal_count = Arc::new(AtomicU32::new(0));
+
+    install_ctrlc_handler(flow.clone(), Arc::clone(&signal_count));
 
     // ── 6. Ejecutar motor ─────────────────────────────────────────────────────
     let start = Instant::now();
@@ -207,6 +195,154 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
 
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Handler de señales — Windows y Unix
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Instala el handler de Ctrl+C para la plataforma actual.
+///
+/// ## Comportamiento
+///
+/// - Primera señal  → pausa limpia: el motor termina el bloque actual y espera.
+/// - Segunda señal  → cancelación: el motor aborta y guarda el checkpoint.
+///
+/// ## Windows
+///
+/// Usa `SetConsoleCtrlHandler` que intercepta:
+/// - `CTRL_C_EVENT`     (Ctrl+C)
+/// - `CTRL_BREAK_EVENT` (Ctrl+Break)
+/// - `CTRL_CLOSE_EVENT` (cerrar la ventana de la consola)
+///
+/// A diferencia del handler Unix anterior, este funciona correctamente
+/// en Windows sin requerir libc y maneja el cierre de ventana.
+///
+/// ## Unix
+///
+/// Usa `signal(SIGINT)` con un static global (mismo enfoque que antes).
+fn install_ctrlc_handler(flow: FlowControl, signal_count: Arc<AtomicU32>) {
+    #[cfg(windows)]
+    {
+        install_ctrlc_handler_windows(flow, signal_count);
+    }
+
+    #[cfg(unix)]
+    {
+        install_ctrlc_handler_unix(flow, signal_count);
+    }
+}
+
+// ── Windows ───────────────────────────────────────────────────────────────────
+
+#[cfg(windows)]
+fn install_ctrlc_handler_windows(flow: FlowControl, signal_count: Arc<AtomicU32>) {
+    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+
+    // Guardar flow y contador en statics globales para que el handler
+    // extern "system" pueda acceder a ellos sin capturar nada.
+    //
+    // Safety: se escriben exactamente una vez antes de instalar el handler.
+    WINDOWS_FLOW
+        .set(flow)
+        .expect("install_ctrlc_handler llamado más de una vez");
+    WINDOWS_SIGNAL_COUNT
+        .set(signal_count)
+        .expect("install_ctrlc_handler llamado más de una vez");
+
+    unsafe {
+        // TRUE = instalar; FALSE = desinstalar.
+        SetConsoleCtrlHandler(Some(windows_ctrl_handler), 1);
+    }
+}
+
+/// Handler de consola para Windows.
+///
+/// # Safety
+/// Invocado por el OS en un thread separado creado por Windows.
+/// Solo operaciones thread-safe están permitidas aquí.
+/// Retornar TRUE indica que el evento fue manejado (no propagar).
+/// Retornar FALSE indica que otros handlers deben procesarlo.
+#[cfg(windows)]
+unsafe extern "system" fn windows_ctrl_handler(ctrl_type: u32) -> i32 {
+    // CTRL_C_EVENT = 0, CTRL_BREAK_EVENT = 1, CTRL_CLOSE_EVENT = 2
+    // Manejamos los tres: todos deben provocar pausa o cancelación limpia.
+    match ctrl_type {
+        0 | 1 | 2 => {
+            handle_signal();
+            // Retornar TRUE para CTRL_CLOSE_EVENT da al proceso tiempo de
+            // guardar el checkpoint antes de que Windows lo termine.
+            // Para CTRL_C y CTRL_BREAK, el motor gestiona la pausa.
+            1 // TRUE
+        }
+        _ => 0, // FALSE: dejar que otros handlers lo procesen
+    }
+}
+
+/// Lógica compartida entre Windows y Unix para procesar la señal.
+#[cfg(windows)]
+fn handle_signal() {
+    if let Some(count) = WINDOWS_SIGNAL_COUNT.get() {
+        let prev = count.fetch_add(1, Ordering::SeqCst);
+        if let Some(flow) = WINDOWS_FLOW.get() {
+            if prev == 0 {
+                // Primera señal: pausar limpiamente
+                eprintln!("\n⏸  Pausa solicitada. Presiona Ctrl+C de nuevo para cancelar.");
+                flow.pause();
+            } else {
+                // Segunda señal: cancelar definitivamente
+                eprintln!("\n⚠  Cancelando y guardando checkpoint...");
+                flow.cancel();
+            }
+        }
+    }
+}
+
+// Statics globales para Windows (necesarios porque el handler es extern "system")
+#[cfg(windows)]
+static WINDOWS_FLOW: std::sync::OnceLock<FlowControl> = std::sync::OnceLock::new();
+
+#[cfg(windows)]
+static WINDOWS_SIGNAL_COUNT: std::sync::OnceLock<Arc<AtomicU32>> =
+    std::sync::OnceLock::new();
+
+// ── Unix ──────────────────────────────────────────────────────────────────────
+
+#[cfg(unix)]
+fn install_ctrlc_handler_unix(flow: FlowControl, signal_count: Arc<AtomicU32>) {
+    UNIX_FLOW
+        .set(flow)
+        .expect("install_ctrlc_handler llamado más de una vez");
+    UNIX_SIGNAL_COUNT
+        .set(signal_count)
+        .expect("install_ctrlc_handler llamado más de una vez");
+
+    unsafe {
+        libc::signal(libc::SIGINT, unix_sigint_handler as libc::sighandler_t);
+    }
+}
+
+#[cfg(unix)]
+extern "C" fn unix_sigint_handler(_sig: libc::c_int) {
+    if let Some(count) = UNIX_SIGNAL_COUNT.get() {
+        let prev = count.fetch_add(1, Ordering::SeqCst);
+        if let Some(flow) = UNIX_FLOW.get() {
+            if prev == 0 {
+                eprintln!("\n⏸  Pausa solicitada. Presiona Ctrl+C de nuevo para cancelar.");
+                flow.pause();
+            } else {
+                eprintln!("\n⚠  Cancelando y guardando checkpoint...");
+                flow.cancel();
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+static UNIX_FLOW: std::sync::OnceLock<FlowControl> = std::sync::OnceLock::new();
+
+#[cfg(unix)]
+static UNIX_SIGNAL_COUNT: std::sync::OnceLock<Arc<AtomicU32>> =
+    std::sync::OnceLock::new();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UI helpers
@@ -310,7 +446,7 @@ fn print_summary(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Logging y señales
+// Logging
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn init_logging(verbosity: u8, quiet: bool) {
@@ -336,31 +472,4 @@ fn init_logging(verbosity: u8, quiet: bool) {
         .with_thread_ids(false)
         .compact()
         .init();
-}
-
-fn ctrlc_handler(handler: impl Fn() + Send + Sync + 'static) {
-    #[cfg(unix)]
-    {
-        UNIX_SIGNAL_HANDLER.set(Arc::new(handler)).ok();
-        unsafe {
-            libc::signal(libc::SIGINT, unix_sigint_handler as libc::sighandler_t);
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        let _ = handler;
-        // TODO Fase 2: SetConsoleCtrlHandler para pausa limpia en Windows.
-    }
-}
-
-#[cfg(unix)]
-static UNIX_SIGNAL_HANDLER: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>> =
-    std::sync::OnceLock::new();
-
-#[cfg(unix)]
-extern "C" fn unix_sigint_handler(_sig: libc::c_int) {
-    if let Some(handler) = UNIX_SIGNAL_HANDLER.get() {
-        handler();
-    }
 }
