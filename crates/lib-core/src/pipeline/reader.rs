@@ -59,6 +59,11 @@ impl BlockReader {
         source_path: &Path,
         tx: Sender<Block>,
     ) -> Result<Option<String>> {
+        // Obtener tamaño del archivo para calcular progreso
+        let file_size = std::fs::metadata(source_path)
+            .map_err(|e| CoreError::read(source_path, e))?
+            .len();
+
         let file = File::open(source_path)
             .map_err(|e| CoreError::read(source_path, e))?;
 
@@ -116,18 +121,29 @@ impl BlockReader {
             // ── Telemetría ─────────────────────────────────────────────────
             self.telemetry.add_bytes(n as u64);
 
-            let block = Block::new(buf, offset, sequence);
-            offset   += n as u64;
+            // ── Actualizar progreso del archivo actual ─────────────────────
+            offset += n as u64;
+            let progress = if file_size > 0 {
+                offset as f64 / file_size as f64
+            } else {
+                1.0
+            };
+            self.telemetry.set_current_file(source_path, progress);
+
             sequence += 1;
 
             // ── Enviar al canal (bloqueante = backpressure) ────────────────
             // Si el canal está lleno, esta llamada bloquea el thread del reader
             // hasta que el writer consuma un slot. Es el backpressure.
+            let block = Block::new(buf, offset, sequence);
             if tx.send(block).is_err() {
                 // El receiver (writer) se cayó: error fatal del pipeline.
                 return Err(CoreError::PipelineDisconnected);
             }
         }
+
+        // Limpiar el archivo actual al terminar
+        self.telemetry.clear_current_file();
 
         Ok(hasher.map(|h| h.finalize()))
     }

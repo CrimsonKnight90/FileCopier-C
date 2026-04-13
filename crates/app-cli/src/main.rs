@@ -401,14 +401,41 @@ fn print_progress(p: &CopyProgress) {
     let filled = ((p.percent / 100.0) * bar_width as f64) as usize;
     let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
 
-    print!(
-        "\r  [{bar}] {:.1}%  {}  {}/{}  ETA: {}    ",
-        p.percent,
-        p.throughput_human(),
-        p.completed_files,
-        p.total_files,
-        p.eta_human(),
-    );
+    // Mostrar progreso del archivo actual si hay uno en proceso
+    if let Some(ref current_file) = p.current_file {
+        // Extraer solo el nombre del archivo (último componente del path)
+        let file_name = std::path::Path::new(current_file)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(current_file.as_str());
+        
+        // Barra de progreso interno del archivo (10 caracteres)
+        let inner_bar_width: usize = 10;
+        let inner_filled = ((p.current_file_progress * 100.0 / 100.0) * inner_bar_width as f64) as usize;
+        let inner_bar: String = "█".repeat(inner_filled.min(inner_bar_width)) 
+            + &"░".repeat((inner_bar_width - inner_filled).saturating_sub(1).min(inner_bar_width));
+        
+        print!(
+            "\r  [{bar}] {:.1}%  {}  {}/{}  ETA: {}  |  {}: [{}] {:.0}%",
+            p.percent,
+            p.throughput_human(),
+            p.completed_files,
+            p.total_files,
+            p.eta_human(),
+            file_name,
+            inner_bar,
+            p.current_file_progress * 100.0,
+        );
+    } else {
+        print!(
+            "\r  [{bar}] {:.1}%  {}  {}/{}  ETA: {}    ",
+            p.percent,
+            p.throughput_human(),
+            p.completed_files,
+            p.total_files,
+            p.eta_human(),
+        );
+    }
 
     use std::io::Write;
     let _ = std::io::stdout().flush();
