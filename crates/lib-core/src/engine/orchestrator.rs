@@ -208,6 +208,17 @@ impl Orchestrator {
         );
 
         for entry in large_files {
+            // Comprobar cancelación antes de cada archivo grande.
+            // Si se canceló durante el enjambre, no procesamos más archivos.
+            if self.flow.is_cancelled() {
+                telemetry.fail_file();
+                checkpoint.mark_failed(
+                    entry.relative.clone(),
+                    "Cancelado por el usuario".into(),
+                );
+                continue;
+            }
+
             tracing::info!(
                 "Copiando (bloques): {} ({:.1} MB)",
                 entry.source.display(),
