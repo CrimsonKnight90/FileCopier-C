@@ -10,8 +10,7 @@
 //! - `FlowControl`: pause/resume/cancel con `check()`
 
 #[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
+mod tests {    
     use std::path::PathBuf;
 
     use lib_core::checkpoint::{CheckpointState, FlowControl};
