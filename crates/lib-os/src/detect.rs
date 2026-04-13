@@ -2,19 +2,11 @@
 //!
 //! Detección de tipo de hardware de almacenamiento.
 //!
-//! ## Windows — estrategia sin permisos elevados
+//! ## Windows
 //!
-//! Consultamos el registro de Windows en:
-//! `HKLM\SYSTEM\CurrentControlSet\Services\storahci\Enum`
-//! o bien usamos `GetDriveTypeW` + heurística de nombre de volumen.
-//!
-//! La forma más robusta sin permisos de administrador es consultar
-//! `IOCTL_STORAGE_QUERY_PROPERTY` abriendo el **volumen** (no el disco físico)
-//! con `CreateFileW`. En windows-sys 0.59, `CreateFileW` está en:
-//! `Win32::Storage::FileSystem` — pero requiere el feature `Win32_Storage_FileSystem`.
-//!
-//! Si el IOCTL falla (máquinas virtuales, permisos), el fallback es `Hdd`
-//! (modo conservador: nunca asumimos más paralelismo del que el hardware soporta).
+//! Usa `IOCTL_STORAGE_QUERY_PROPERTY` con `StorageDeviceSeekPenaltyProperty`:
+//!   - `IncursSeekPenalty = 0` → SSD / NVMe
+//!   - `IncursSeekPenalty = 1` → HDD mecánico
 //!
 //! ## Linux
 //!
@@ -50,7 +42,7 @@ fn windows_detect(path: &Path) -> DriveKind {
         None    => return DriveKind::Network,
     };
 
-    let root_wide: Vec<u16> = encode_wide(&root);
+    let root_wide = encode_wide(&root);
 
     let drive_type = unsafe {
         windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(root_wide.as_ptr())
@@ -63,41 +55,34 @@ fn windows_detect(path: &Path) -> DriveKind {
             let letter = &root[..2]; // "C:"
             detect_seek_penalty(letter).unwrap_or(DriveKind::Hdd)
         }
-        2 => DriveKind::Hdd, // DRIVE_REMOVABLE
+        2 => DriveKind::Hdd,   // DRIVE_REMOVABLE
         _ => DriveKind::Unknown,
     }
 }
 
-/// Detecta seek penalty via IOCTL_STORAGE_QUERY_PROPERTY.
-///
-/// Abrimos `\\.\C:` con `CreateFileW` (en el módulo correcto de windows-sys:
-/// `Win32::Storage::FileSystem`). Requiere el feature `Win32_Storage_FileSystem`.
+/// Consulta IOCTL_STORAGE_QUERY_PROPERTY para determinar SSD vs HDD.
+/// `drive_letter` = `"C:"` (sin barra final).
 #[cfg(windows)]
 fn detect_seek_penalty(drive_letter: &str) -> Option<DriveKind> {
-    // CreateFileW vive en Win32::Storage::FileSystem en windows-sys 0.59
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW,
-        FILE_FLAG_NO_BUFFERING,
-        FILE_SHARE_READ,
-        FILE_SHARE_WRITE,
-        OPEN_EXISTING,
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
 
-    // "\\.\C:" — abrir el volumen, no el disco físico.
-    // El volumen no requiere permisos de administrador para consultas IOCTL.
+    // Abrir "\\.\C:" con acceso 0 (solo consulta de propiedades IOCTL).
+    // No requiere permisos de administrador para volúmenes locales.
     let volume_path = format!("\\\\.\\{drive_letter}");
     let volume_wide = encode_wide(&volume_path);
 
     let handle = unsafe {
         CreateFileW(
             volume_wide.as_ptr(),
-            0,                                  // dwDesiredAccess = 0 (solo consulta)
+            0,                                  // dwDesiredAccess = 0 (consulta)
             FILE_SHARE_READ | FILE_SHARE_WRITE, // dwShareMode
             std::ptr::null(),                   // lpSecurityAttributes
             OPEN_EXISTING,                      // dwCreationDisposition
             0,                                  // dwFlagsAndAttributes
-            0,                                  // hTemplateFile
+            std::ptr::null_mut(),               // hTemplateFile ← debe ser *mut c_void
         )
     };
 
@@ -115,17 +100,15 @@ fn detect_seek_penalty(drive_letter: &str) -> Option<DriveKind> {
     result
 }
 
-/// Envía IOCTL_STORAGE_QUERY_PROPERTY al handle y devuelve SSD o HDD.
+/// Envía IOCTL_STORAGE_QUERY_PROPERTY y devuelve SSD o HDD.
 #[cfg(windows)]
 fn query_seek_penalty(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<DriveKind> {
     use windows_sys::Win32::System::IO::DeviceIoControl;
 
-    // Constantes del SDK de Windows
-    const IOCTL_STORAGE_QUERY_PROPERTY:          u32 = 0x002D_1400;
-    const STORAGE_DEVICE_SEEK_PENALTY_PROPERTY:  i32 = 7;
-    const PROPERTY_STANDARD_QUERY:               i32 = 0;
+    const IOCTL_STORAGE_QUERY_PROPERTY:         u32 = 0x002D_1400;
+    const STORAGE_DEVICE_SEEK_PENALTY_PROPERTY: i32 = 7;
+    const PROPERTY_STANDARD_QUERY:              i32 = 0;
 
-    /// STORAGE_PROPERTY_QUERY
     #[repr(C)]
     struct StoragePropertyQuery {
         property_id:           i32,
@@ -133,12 +116,11 @@ fn query_seek_penalty(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<
         additional_parameters: [u8; 1],
     }
 
-    /// DEVICE_SEEK_PENALTY_DESCRIPTOR
     #[repr(C)]
     struct DeviceSeekPenaltyDescriptor {
         version:             u32,
         size:                u32,
-        incurs_seek_penalty: u8,  // 0 = SSD, 1 = HDD
+        incurs_seek_penalty: u8, // 0 = SSD, 1 = HDD
     }
 
     let query = StoragePropertyQuery {
@@ -181,25 +163,21 @@ fn query_seek_penalty(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<
     Some(kind)
 }
 
-/// Extrae `"C:\\"` de cualquier path de Windows sin llamar a `canonicalize()`.
+/// Extrae `"C:\\"` de cualquier path Windows sin llamar a `canonicalize()`.
 #[cfg(windows)]
 fn extract_drive_root(path: &Path) -> Option<String> {
     let s = path.to_string_lossy();
-
-    // UNC path → tratar como red
     if s.starts_with("\\\\") || s.starts_with("//") {
-        return None;
+        return None; // UNC → red
     }
-
     let b = s.as_bytes();
     if b.len() >= 2 && b[1] == b':' && (b[0] as char).is_ascii_alphabetic() {
         return Some(format!("{}:\\", (b[0] as char).to_ascii_uppercase()));
     }
-
     None
 }
 
-/// Convierte un `&str` a `Vec<u16>` terminado en null (para WinAPI).
+/// Convierte `&str` a `Vec<u16>` terminado en null para WinAPI.
 #[cfg(windows)]
 fn encode_wide(s: &str) -> Vec<u16> {
     use std::ffi::OsStr;
@@ -232,17 +210,13 @@ fn find_block_device(path: &Path) -> Option<String> {
         let mut parts  = line.split_whitespace();
         let device     = parts.next()?;
         let mountpoint = parts.next()?;
-
         if abs_str.starts_with(mountpoint) && mountpoint.len() > best_mount.len() {
             best_mount = mountpoint;
             best_dev   = device;
         }
     }
 
-    if best_dev.is_empty() {
-        return None;
-    }
-
+    if best_dev.is_empty() { return None; }
     let dev_name = Path::new(best_dev).file_name()?.to_str()?;
     Some(strip_partition_number(dev_name).to_string())
 }
@@ -263,11 +237,7 @@ fn strip_partition_number(dev: &str) -> &str {
 #[cfg(unix)]
 fn read_rotational(dev_name: &str) -> DriveKind {
     match std::fs::read_to_string(format!("/sys/block/{dev_name}/queue/rotational")) {
-        Ok(s) => match s.trim() {
-            "0" => DriveKind::Ssd,
-            "1" => DriveKind::Hdd,
-            _   => DriveKind::Unknown,
-        },
+        Ok(s) => match s.trim() { "0" => DriveKind::Ssd, "1" => DriveKind::Hdd, _ => DriveKind::Unknown },
         Err(_) => DriveKind::Unknown,
     }
 }
