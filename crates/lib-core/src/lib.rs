@@ -19,7 +19,9 @@ pub mod error;
 pub mod hash;
 pub mod pipeline;
 pub mod telemetry;
+pub mod os_ops;
 
 // Re-exportaciones convenientes para usuarios del crate
 pub use config::EngineConfig;
 pub use error::{CoreError, Result};
+pub use os_ops::{NoOpOsOps, OsOps};

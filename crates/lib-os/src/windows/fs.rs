@@ -45,8 +45,6 @@ impl OsAdapter for WindowsAdapter {
         use std::fs::OpenOptions;
         use std::os::windows::io::AsRawHandle;
 
-        // Abrir el archivo existente para modificar su información de allocación.
-        // El archivo debe existir ya (creado por el writer antes de llamar aquí).
         let file = OpenOptions::new()
             .write(true)
             .open(path)
@@ -54,8 +52,6 @@ impl OsAdapter for WindowsAdapter {
 
         let handle = file.as_raw_handle();
 
-        // FILE_ALLOCATION_INFO: reserva `AllocationSize` bytes en NTFS.
-        // Diferente de SetEndOfFile: no escribe ceros, solo extiende la MFT entry.
         #[repr(C)]
         struct FileAllocationInfo {
             allocation_size: i64,
@@ -65,7 +61,6 @@ impl OsAdapter for WindowsAdapter {
             allocation_size: size as i64,
         };
 
-        // FileAllocationInfo = 5 en el enum FILE_INFO_BY_HANDLE_CLASS de WinAPI
         const FILE_ALLOCATION_INFO_CLASS: i32 = 5;
 
         let result = unsafe {
@@ -78,8 +73,6 @@ impl OsAdapter for WindowsAdapter {
         };
 
         if result == 0 {
-            // SetFileInformationByHandle falló. Ocurre en FAT32/exFAT y red.
-            // Degradamos silenciosamente: la copia continúa sin preallocación.
             tracing::warn!(
                 "Preallocación no soportada en '{}': {} (degradando)",
                 path.display(),
@@ -98,15 +91,13 @@ impl OsAdapter for WindowsAdapter {
         let src_meta = std::fs::metadata(source)
             .map_err(|e| CoreError::io(source, e))?;
 
-        // Copiar atributos de archivo (hidden, read-only, system, archive).
-        // Excluimos: comprimido, encrypted, reparse_point (no tienen sentido en destino).
         let src_attrs = src_meta.file_attributes();
 
-        const COPY_ATTRS: u32 = 0x00000001  // FILE_ATTRIBUTE_READONLY
-            | 0x00000002  // FILE_ATTRIBUTE_HIDDEN
-            | 0x00000004  // FILE_ATTRIBUTE_SYSTEM
-            | 0x00000020  // FILE_ATTRIBUTE_ARCHIVE
-            | 0x00000080; // FILE_ATTRIBUTE_NORMAL
+        const COPY_ATTRS: u32 = 0x00000001
+            | 0x00000002
+            | 0x00000004
+            | 0x00000020
+            | 0x00000080;
 
         let attrs_to_set = src_attrs & COPY_ATTRS;
 
@@ -127,7 +118,6 @@ impl OsAdapter for WindowsAdapter {
             };
 
             if result == 0 {
-                // No fatal: metadatos son best-effort en MVP
                 tracing::warn!(
                     "No se pudieron copiar atributos a '{}': {}",
                     dest.display(),
@@ -136,14 +126,25 @@ impl OsAdapter for WindowsAdapter {
             }
         }
 
-        // TODO Fase 2: copiar timestamps con crate `filetime`.
-        // La API estable de Rust no expone SetFileTime directamente.
-
         tracing::trace!("Metadatos copiados: {} → {}", source.display(), dest.display());
         Ok(())
     }
 
     fn platform_name(&self) -> &'static str {
         "windows"
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// NUEVO: Implementación del trait OsOps para lib-core
+// ─────────────────────────────────────────────────────────────
+
+impl lib_core::os_ops::OsOps for WindowsAdapter {
+    fn preallocate(&self, path: &Path, size: u64) -> Result<()> {
+        <Self as crate::traits::OsAdapter>::preallocate(self, path, size)
+    }
+
+    fn copy_metadata(&self, source: &Path, dest: &Path) -> Result<()> {
+        <Self as crate::traits::OsAdapter>::copy_metadata(self, source, dest)
     }
 }

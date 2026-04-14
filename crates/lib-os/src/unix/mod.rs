@@ -57,14 +57,11 @@ impl OsAdapter for UnixAdapter {
 
         #[cfg(target_os = "linux")]
         {
-            // posix_fallocate: reserva bloques sin escribir ceros.
-            // Retorna un código de error como int (no pone errno).
             let result = unsafe {
                 libc::posix_fallocate(fd, 0, size as libc::off_t)
             };
 
             if result != 0 {
-                // EOPNOTSUPP (95) en tmpfs/NFS: degradamos silenciosamente.
                 let err = std::io::Error::from_raw_os_error(result);
                 tracing::warn!(
                     "posix_fallocate no soportado en '{}': {} (degradando)",
@@ -78,7 +75,6 @@ impl OsAdapter for UnixAdapter {
 
         #[cfg(target_os = "macos")]
         {
-            // macOS: fcntl con F_PREALLOCATE + ftruncate
             #[repr(C)]
             struct FStore {
                 fst_flags:      u32,
@@ -112,7 +108,6 @@ impl OsAdapter for UnixAdapter {
                 );
             }
 
-            // Extender el tamaño del archivo después de prealocar
             unsafe { libc::ftruncate(fd, size as libc::off_t) };
         }
 
@@ -132,12 +127,10 @@ impl OsAdapter for UnixAdapter {
         let src_meta = std::fs::metadata(source)
             .map_err(|e| CoreError::io(source, e))?;
 
-        // 1. Permisos (mode bits POSIX)
         let mode = src_meta.mode();
         std::fs::set_permissions(dest, std::fs::Permissions::from_mode(mode))
             .map_err(|e| CoreError::io(dest, e))?;
 
-        // 2. Timestamps (atime + mtime) con nanosegundos
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::io::AsRawFd;
@@ -162,7 +155,6 @@ impl OsAdapter for UnixAdapter {
             }
         }
 
-        // 3. uid/gid (solo si somos root; en caso contrario EPERM es esperado)
         #[cfg(target_os = "linux")]
         {
             use std::ffi::CString;
@@ -175,7 +167,6 @@ impl OsAdapter for UnixAdapter {
                 let result = unsafe { libc::lchown(dest_cstr.as_ptr(), uid, gid) };
                 if result != 0 {
                     let err = std::io::Error::last_os_error();
-                    // EPERM sin root: silencioso. Otros errores: warning.
                     if err.raw_os_error() != Some(libc::EPERM) {
                         tracing::warn!("lchown falló en '{}': {}", dest.display(), err);
                     }
@@ -194,5 +185,19 @@ impl OsAdapter for UnixAdapter {
 
     fn platform_name(&self) -> &'static str {
         "unix"
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// NUEVO: Implementación del trait OsOps para lib-core
+// ─────────────────────────────────────────────────────────────
+
+impl lib_core::os_ops::OsOps for UnixAdapter {
+    fn preallocate(&self, path: &Path, size: u64) -> Result<()> {
+        <Self as crate::traits::OsAdapter>::preallocate(self, path, size)
+    }
+
+    fn copy_metadata(&self, source: &Path, dest: &Path) -> Result<()> {
+        <Self as crate::traits::OsAdapter>::copy_metadata(self, source, dest)
     }
 }

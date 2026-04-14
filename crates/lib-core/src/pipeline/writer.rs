@@ -7,7 +7,9 @@
 //! - Crear el archivo destino como `.partial` (si `config.use_partial_files`).
 //! - Recibir bloques del canal crossbeam y escribirlos secuencialmente.
 //! - Computar el hash del destino si `config.verify == true`.
+//! - Pre-allocar espacio antes del primer byte (reduce fragmentación NTFS).
 //! - Realizar rename atómico del `.partial` al nombre final.
+//! - Copiar metadatos (timestamps, atributos) tras el rename.
 //!
 //! ## Garantías de escritura
 //!
@@ -22,13 +24,20 @@
 //!
 //!   foto.jpg  → foto.jpg.partial   ✓
 //!   Makefile  → Makefile.partial   ✓
-//!   foto.jpg  → foto.partial       ✗  (with_extension reemplaza)
 //!
-//! ## Rename atómico
+//! ## Orden de operaciones
 //!
-//! En Windows y Linux, `std::fs::rename` es atómico dentro del mismo
-//! volumen. El archivo `.partial` nunca aparece con el nombre final
-//! hasta que la copia está completa y verificada.
+//! ```text
+//! 1. create_dir_all(dest.parent())
+//! 2. create(partial_path)          ← archivo existe en disco
+//! 3. preallocate(partial_path, size_hint)  ← reservar espacio
+//! 4. write_all(blocks...)          ← escribir datos
+//! 5. flush()                       ← vaciar buffer OS
+//! 6. drop(BufWriter)
+//! 7. verify hash (si config.verify)
+//! 8. rename(partial → dest)        ← atómico
+//! 9. copy_metadata(source, dest)   ← timestamps y atributos
+//! ```
 
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
@@ -39,6 +48,7 @@ use crossbeam::channel::Receiver;
 use crate::config::EngineConfig;
 use crate::error::{CoreError, Result};
 use crate::hash::HasherDispatch;
+use crate::os_ops::OsOps;
 use crate::pipeline::Block;
 
 /// Resultado de una operación de escritura completada.
@@ -65,15 +75,20 @@ impl BlockWriter {
 
     /// Recibe bloques de `rx` y los escribe en `dest_path`.
     ///
+    /// `source_path` se usa para copiar metadatos tras el rename.
     /// `source_hash` es el hash del origen calculado por el `BlockReader`.
-    /// Si se pasa `Some`, se verifica contra el hash calculado del destino.
+    /// `os_ops` provee preallocación y copia de metadatos (plataforma-específico).
+    /// `file_size` es el tamaño total esperado en bytes (hint para preallocación).
     pub fn run(
         &self,
+        source_path: &Path,
         dest_path:   &Path,
         rx:          Receiver<Block>,
         source_hash: Option<&str>,
+        os_ops:      &dyn OsOps,
+        file_size:   u64,
     ) -> Result<WriteResult> {
-        // ── Calcular path del archivo .partial ────────────────────────────
+        // ── Path del archivo .partial ─────────────────────────────────────
         let partial_path = if self.config.use_partial_files {
             let file_name = dest_path
                 .file_name()
@@ -87,7 +102,7 @@ impl BlockWriter {
             dest_path.to_path_buf()
         };
 
-        // ── Asegurar que el directorio destino existe ─────────────────────
+        // ── Asegurar directorio destino ───────────────────────────────────
         if let Some(parent) = partial_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| CoreError::io(parent, e))?;
@@ -101,8 +116,22 @@ impl BlockWriter {
             .open(&partial_path)
             .map_err(|e| CoreError::write(&partial_path, e))?;
 
-        // BufWriter agrupa escrituras pequeñas. El buffer tiene el mismo
-        // tamaño que el bloque para maximizar la eficiencia.
+        // ── Preallocación ─────────────────────────────────────────────────
+        // Llamar ANTES del primer write, DESPUÉS de crear el archivo.
+        // En NTFS: reserva bloques contiguos → elimina fragmentación.
+        // En FAT32/red: no-op silencioso.
+        if file_size > 0 {
+            if let Err(e) = os_ops.preallocate(&partial_path, file_size) {
+                // Preallocación es best-effort: un fallo no cancela la copia.
+                tracing::warn!(
+                    "Preallocación fallida para '{}': {} (continuando sin ella)",
+                    partial_path.display(),
+                    e
+                );
+            }
+        }
+
+        // ── BufWriter ─────────────────────────────────────────────────────
         let mut writer = BufWriter::with_capacity(self.config.block_size_bytes, file);
 
         let mut hasher = if self.config.verify {
@@ -114,7 +143,6 @@ impl BlockWriter {
         let mut bytes_written: u64 = 0;
 
         // ── Loop de escritura ─────────────────────────────────────────────
-        // `rx` se cierra automáticamente cuando el reader hace drop del Sender.
         for block in &rx {
             if let Some(ref mut h) = hasher {
                 h.update(&block.data);
@@ -132,12 +160,11 @@ impl BlockWriter {
             );
         }
 
-        // ── Flush explícito ───────────────────────────────────────────────
+        // ── Flush explícito antes del rename ──────────────────────────────
         writer
             .flush()
             .map_err(|e| CoreError::write(&partial_path, e))?;
 
-        // Liberar el BufWriter antes del rename
         drop(writer);
 
         // ── Verificación de integridad ────────────────────────────────────
@@ -145,7 +172,6 @@ impl BlockWriter {
 
         if let (Some(src), Some(dst)) = (source_hash, dest_hash.as_deref()) {
             if src != dst {
-                // Eliminar el archivo corrupto antes de retornar el error
                 let _ = std::fs::remove_file(&partial_path);
                 return Err(CoreError::HashMismatch {
                     path:     dest_path.to_path_buf(),
@@ -168,6 +194,18 @@ impl BlockWriter {
             );
         }
 
+        // ── Copiar metadatos ──────────────────────────────────────────────
+        // DESPUÉS del rename: aplicar al archivo con su nombre final.
+        // Timestamps y atributos se preservan aquí.
+        if let Err(e) = os_ops.copy_metadata(source_path, dest_path) {
+            // Best-effort: un fallo en metadatos no cancela la copia.
+            tracing::warn!(
+                "copy_metadata fallida para '{}': {}",
+                dest_path.display(),
+                e
+            );
+        }
+
         Ok(WriteResult {
             dest_hash,
             bytes_written,
@@ -177,9 +215,6 @@ impl BlockWriter {
 }
 
 /// Limpia archivos `.partial` huérfanos en un directorio destino.
-///
-/// Llamado al inicio si el usuario NO usa `--resume`, para no dejar
-/// restos de operaciones anteriores fallidas.
 pub fn cleanup_partial_files(dest_root: &Path) -> std::io::Result<usize> {
     let mut count = 0;
     for entry in walkdir::WalkDir::new(dest_root)

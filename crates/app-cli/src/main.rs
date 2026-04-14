@@ -179,8 +179,19 @@ fn run(cli: Cli) -> lib_core::error::Result<()> {
         },
     );
 
-    let orchestrator = Orchestrator::new(config, flow);
-    let result       = orchestrator.run(&cli.source, &cli.dest, Some(on_progress))?;
+    // NUEVO: construir OsOps según detección o modo manual
+    let os_ops: Arc<dyn lib_core::os_ops::OsOps> = if !cli.no_detect {
+        Arc::new(lib_os::platform_adapter_os_ops())
+    } else {
+        Arc::new(lib_core::os_ops::NoOpOsOps)
+    };
+
+    // NUEVO: pasar os_ops al Orchestrator
+    let orchestrator = Orchestrator::new(config, flow, os_ops);
+
+    // Ejecutar
+    let result = orchestrator.run(&cli.source, &cli.dest, Some(on_progress))?;
+
 
     // ── 7. Resumen final ──────────────────────────────────────────────────────
     if !cli.quiet {

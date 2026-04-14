@@ -9,12 +9,15 @@
 //! - File descriptors del OS.
 //! - Cabezal del HDD si el destino es disco mecánico.
 //!
-//! ## Por qué tokio y no rayon
+//! ## Pausa/Reanudar
 //!
-//! Los archivos pequeños tienen latencia de metadatos dominante (open,
-//! stat, create, rename). Son operaciones I/O-bound, no CPU-bound.
-//! tokio maneja cientos de tareas I/O con muy pocos threads OS,
-//! mientras que rayon crearía un thread por tarea (ineficiente para I/O).
+//! Cuando `FlowControl` está pausado, las tareas en vuelo terminan su
+//! archivo actual (no se interrumpen a mitad de escritura) y luego
+//! esperan en `wait_for_resume()`. Las tareas que aún no han comenzado
+//! también esperan antes de adquirir el semáforo.
+//!
+//! Esto es simétrico con el comportamiento de `BlockEngine`, que pausa
+//! entre bloques y espera con `wait_for_resume()`.
 //!
 //! ## Hashing en el enjambre
 //!
@@ -31,6 +34,7 @@ use crate::checkpoint::FlowControl;
 use crate::config::EngineConfig;
 use crate::error::{CoreError, Result};
 use crate::hash::HasherDispatch;
+use crate::os_ops::OsOps;
 use crate::telemetry::TelemetryHandle;
 
 use super::orchestrator::FileEntry;
@@ -44,6 +48,7 @@ pub struct SwarmEngine {
     config:    Arc<EngineConfig>,
     flow:      FlowControl,
     telemetry: TelemetryHandle,
+    os_ops:    Arc<dyn OsOps>,   // ← NUEVO
 }
 
 impl SwarmEngine {
@@ -51,8 +56,9 @@ impl SwarmEngine {
         config:    Arc<EngineConfig>,
         flow:      FlowControl,
         telemetry: TelemetryHandle,
+        os_ops:    Arc<dyn OsOps>,   // ← NUEVO
     ) -> Self {
-        Self { config, flow, telemetry }
+        Self { config, flow, telemetry, os_ops }
     }
 
     /// Copia todos los archivos de `files` en paralelo.
@@ -62,7 +68,7 @@ impl SwarmEngine {
     pub async fn run(
         &self,
         files:            Vec<FileEntry>,
-        _checkpoint_path: &Path, // Reservado para checkpointing del enjambre (Fase 2)
+        _checkpoint_path: &Path,
     ) -> Result<Vec<SwarmFileResult>> {
         if files.is_empty() {
             return Ok(vec![]);
@@ -72,39 +78,77 @@ impl SwarmEngine {
         let mut handles = Vec::with_capacity(files.len());
 
         for entry in files {
-            // Comprobar cancelación antes de lanzar cada tarea
             if self.flow.is_cancelled() {
+                tracing::debug!("Enjambre: cancelación detectada, deteniendo despacho de tareas");
                 break;
+            }
+
+            if self.flow.is_paused() {
+                let flow_wait = self.flow.clone();
+                let wait_result = tokio::task::spawn_blocking(move || {
+                    flow_wait.wait_for_resume()
+                })
+                .await
+                .map_err(|_| CoreError::PipelineDisconnected)?;
+
+                if let Err(CoreError::PipelineDisconnected) = wait_result {
+                    tracing::info!("Enjambre: cancelado durante espera de pausa");
+                    break;
+                }
             }
 
             let sem       = Arc::clone(&semaphore);
             let config    = Arc::clone(&self.config);
             let telemetry = self.telemetry.clone();
             let flow      = self.flow.clone();
+            let os_ops    = Arc::clone(&self.os_ops);   // ← NUEVO
 
             let handle = tokio::spawn(async move {
-                // Adquirir slot del semáforo (backpressure del enjambre)
                 let _permit = sem
                     .acquire()
                     .await
                     .expect("Semáforo cerrado inesperadamente");
 
-                if flow.is_cancelled() || flow.is_paused() {
-                    return (entry.relative, Err(CoreError::Paused));
+                if flow.is_cancelled() {
+                    return (entry.relative, Err(CoreError::PipelineDisconnected));
                 }
 
-                let result = copy_small_file(&entry, &config, &telemetry).await;
+                if flow.is_paused() {
+                    let flow_inner = flow.clone();
+                    let resume = tokio::task::spawn_blocking(move || {
+                        flow_inner.wait_for_resume()
+                    })
+                    .await;
+
+                    match resume {
+                        Ok(Ok(())) => {}
+                        Ok(Err(CoreError::PipelineDisconnected)) | Err(_) => {
+                            return (entry.relative, Err(CoreError::PipelineDisconnected));
+                        }
+                        Ok(Err(e)) => {
+                            return (entry.relative, Err(e));
+                        }
+                    }
+                }
+
+                if flow.is_cancelled() {
+                    return (entry.relative, Err(CoreError::PipelineDisconnected));
+                }
+
+                let result = copy_small_file(&entry, &config, &telemetry, os_ops.as_ref()).await;
                 (entry.relative, result)
             });
 
             handles.push(handle);
         }
 
-        // Recoger todos los resultados
         let mut results = Vec::with_capacity(handles.len());
         for handle in handles {
             match handle.await {
                 Ok(result) => results.push(result),
+                Err(e) if e.is_cancelled() => {
+                    tracing::warn!("Tarea del enjambre cancelada por el runtime de tokio");
+                }
                 Err(e) => {
                     tracing::error!("Tarea del enjambre entró en pánico: {e}");
                 }
@@ -116,23 +160,18 @@ impl SwarmEngine {
 }
 
 /// Copia un archivo pequeño de forma async (single-pass: leer todo → escribir).
-///
-/// Para archivos < 16 MB, leer todo en memoria y luego escribir es más
-/// eficiente que el pipeline reader/writer porque evita el overhead del
-/// canal crossbeam para datos que caben en unas pocas KB/MB.
 async fn copy_small_file(
     entry:     &FileEntry,
     config:    &EngineConfig,
     telemetry: &TelemetryHandle,
+    os_ops:    &dyn OsOps,     // ← NUEVO
 ) -> std::result::Result<Option<String>, CoreError> {
-    // Leer el archivo completo en memoria
     let data = tokio::fs::read(&entry.source)
         .await
         .map_err(|e| CoreError::read(&entry.source, e))?;
 
     let size = data.len() as u64;
 
-    // Hash single-pass (los datos ya están en memoria, no hay overhead de re-lectura)
     let hash = if config.verify {
         let mut hasher = HasherDispatch::new(config.hash_algorithm);
         hasher.update(&data);
@@ -141,40 +180,50 @@ async fn copy_small_file(
         None
     };
 
-    // Asegurar que el directorio destino existe
     if let Some(parent) = entry.dest.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| CoreError::io(parent, e))?;
     }
 
-    // Construir path .partial (sufijo al nombre completo, NO reemplazamos extensión)
     let partial_dest = if config.use_partial_files {
-        let file_name = entry.dest
-            .file_name()
-            .expect("dest debe tener nombre de archivo");
+        let file_name = entry.dest.file_name().unwrap();
         let partial_name = format!("{}.partial", file_name.to_string_lossy());
-        entry.dest
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join(partial_name)
+        entry.dest.parent().unwrap().join(partial_name)
     } else {
         entry.dest.clone()
     };
 
-    // Escribir
+    // ← NUEVO: preallocación
+    if size > 0 {
+        if let Err(e) = os_ops.preallocate(&partial_dest, size) {
+            tracing::warn!(
+                "Preallocación fallida en enjambre para '{}': {}",
+                partial_dest.display(),
+                e
+            );
+        }
+    }
+
     tokio::fs::write(&partial_dest, &data)
         .await
         .map_err(|e| CoreError::write(&partial_dest, e))?;
 
-    // Rename atómico
     if config.use_partial_files {
         tokio::fs::rename(&partial_dest, &entry.dest)
             .await
             .map_err(|e| CoreError::rename(&partial_dest, &entry.dest, e))?;
     }
 
-    // Telemetría
+    // ← NUEVO: copia de metadatos
+    if let Err(e) = os_ops.copy_metadata(&entry.source, &entry.dest) {
+        tracing::warn!(
+            "copy_metadata fallida en enjambre para '{}': {}",
+            entry.dest.display(),
+            e
+        );
+    }
+
     telemetry.add_bytes(size);
     telemetry.complete_file();
 

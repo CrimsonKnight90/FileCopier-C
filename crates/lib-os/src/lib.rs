@@ -34,9 +34,7 @@ pub mod unix;
 pub use traits::OsAdapter;
 
 /// Construye el adapter correcto para la plataforma actual.
-///
-/// Este es el único lugar donde el código de plataforma se selecciona.
-/// El llamador recibe un `Box<dyn OsAdapter>` opaco.
+/// Devuelve un `Box<dyn OsAdapter>` usado para detección de hardware.
 pub fn platform_adapter() -> Box<dyn OsAdapter> {
     #[cfg(windows)]
     {
@@ -53,5 +51,19 @@ pub fn platform_adapter() -> Box<dyn OsAdapter> {
         compile_error!(
             "Plataforma no soportada. FileCopier-Rust requiere Windows o Unix."
         );
+    }
+}
+
+/// Construye el adapter de la plataforma actual como `OsOps`
+/// para inyectarlo en lib-core (SwarmEngine, BlockEngine, Writer).
+pub fn platform_adapter_os_ops() -> Box<dyn lib_core::os_ops::OsOps> {
+    #[cfg(windows)]
+    {
+        Box::new(windows::WindowsAdapter::new())
+    }
+
+    #[cfg(unix)]
+    {
+        Box::new(unix::UnixAdapter::new())
     }
 }
