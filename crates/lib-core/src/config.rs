@@ -81,6 +81,18 @@ pub struct EngineConfig {
     ///
     /// Default: true
     pub use_partial_files: bool,
+
+    // ── Throttling de ancho de banda ───────────────────────────────────────────
+
+    /// Límite de ancho de banda en bytes por segundo. Si 0, sin límite.
+    ///
+    /// Default: 0 (sin throttling)
+    pub bandwidth_limit_bytes_per_sec: u64,
+
+    /// Burst inicial para el token bucket (bytes disponibles inmediatamente).
+    ///
+    /// Default: 1 MB
+    pub bandwidth_burst_bytes: u64,
 }
 
 impl Default for EngineConfig {
@@ -94,6 +106,8 @@ impl Default for EngineConfig {
             hash_algorithm:          Algorithm::Blake3,
             resume:                  false,
             use_partial_files:       true,
+            bandwidth_limit_bytes_per_sec: 0,           // Sin throttling por defecto
+            bandwidth_burst_bytes:   1 * 1024 * 1024,   // 1 MB burst
         }
     }
 }

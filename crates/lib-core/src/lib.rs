@@ -11,6 +11,7 @@
 //! - [`telemetry`]  — Métricas diferenciadas en tiempo real.
 //! - [`error`]      — Tipo de error unificado del crate.
 //! - [`config`]     — Configuración centralizada del motor.
+//! - [`bandwidth`]  — Throttling de ancho de banda con token bucket.
 
 pub mod checkpoint;
 pub mod config;
@@ -21,9 +22,11 @@ pub mod pipeline;
 pub mod telemetry;
 pub mod os_ops;
 pub mod buffer_pool;
+pub mod bandwidth;
 
 // Re-exportaciones convenientes para usuarios del crate
 pub use config::EngineConfig;
 pub use error::{CoreError, Result};
 pub use os_ops::{NoOpOsOps, OsOps};
 pub use buffer_pool::{Buffer, BufferPool};
+pub use bandwidth::{Throttle, ThrottleHandle};

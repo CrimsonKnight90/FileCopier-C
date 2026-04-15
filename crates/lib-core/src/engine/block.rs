@@ -96,7 +96,18 @@ impl BlockEngine {
 
         // ── Thread B: Writer (thread actual) ──────────────────────────────
         let config_writer = (*self.config).clone();
-        let writer  = BlockWriter::new(config_writer);
+        
+        // Crear throttle si está configurado límite de ancho de banda
+        let throttle = if self.config.bandwidth_limit_bytes_per_sec > 0 {
+            Some(crate::bandwidth::ThrottleHandle::new(
+                self.config.bandwidth_limit_bytes_per_sec,
+                self.config.bandwidth_burst_bytes,
+            ))
+        } else {
+            None
+        };
+        
+        let writer  = BlockWriter::new(config_writer, throttle);
         let write_result = writer.run(
             source,
             dest,
