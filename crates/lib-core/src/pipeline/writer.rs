@@ -65,12 +65,13 @@ pub struct WriteResult {
 
 /// Escribe bloques recibidos del canal al archivo destino.
 pub struct BlockWriter {
-    config: EngineConfig,
+    config:  EngineConfig,
+    throttle: Option<crate::bandwidth::ThrottleHandle>,
 }
 
 impl BlockWriter {
-    pub fn new(config: EngineConfig) -> Self {
-        Self { config }
+    pub fn new(config: EngineConfig, throttle: Option<crate::bandwidth::ThrottleHandle>) -> Self {
+        Self { config, throttle }
     }
 
     /// Recibe bloques de `rx` y los escribe en `dest_path`.
@@ -146,6 +147,11 @@ impl BlockWriter {
         for block in &rx {
             if let Some(ref mut h) = hasher {
                 h.update(&block.data);
+            }
+
+            // Aplicar throttling si está configurado
+            if let Some(ref throttle) = self.throttle {
+                throttle.consume(block.len() as u64);
             }
 
             writer

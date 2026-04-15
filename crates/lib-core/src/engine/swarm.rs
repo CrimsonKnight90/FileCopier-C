@@ -48,7 +48,8 @@ pub struct SwarmEngine {
     config:    Arc<EngineConfig>,
     flow:      FlowControl,
     telemetry: TelemetryHandle,
-    os_ops:    Arc<dyn OsOps>,   // ← NUEVO
+    os_ops:    Arc<dyn OsOps>,
+    throttle:  Option<crate::bandwidth::ThrottleHandle>,
 }
 
 impl SwarmEngine {
@@ -56,9 +57,19 @@ impl SwarmEngine {
         config:    Arc<EngineConfig>,
         flow:      FlowControl,
         telemetry: TelemetryHandle,
-        os_ops:    Arc<dyn OsOps>,   // ← NUEVO
+        os_ops:    Arc<dyn OsOps>,
     ) -> Self {
-        Self { config, flow, telemetry, os_ops }
+        // Crear throttle si está configurado límite de ancho de banda
+        let throttle = if config.bandwidth_limit_bytes_per_sec > 0 {
+            Some(crate::bandwidth::ThrottleHandle::new(
+                config.bandwidth_limit_bytes_per_sec,
+                config.bandwidth_burst_bytes,
+            ))
+        } else {
+            None
+        };
+        
+        Self { config, flow, telemetry, os_ops, throttle }
     }
 
     /// Copia todos los archivos de `files` en paralelo.
@@ -135,7 +146,13 @@ impl SwarmEngine {
                     return (entry.relative, Err(CoreError::PipelineDisconnected));
                 }
 
-                let result = copy_small_file(&entry, &config, &telemetry, os_ops.as_ref()).await;
+                let result = copy_small_file(
+                    &entry,
+                    &config,
+                    &telemetry,
+                    os_ops.as_ref(),
+                    self.throttle.as_ref(),
+                ).await;
                 (entry.relative, result)
             });
 
@@ -164,8 +181,14 @@ async fn copy_small_file(
     entry:     &FileEntry,
     config:    &EngineConfig,
     telemetry: &TelemetryHandle,
-    os_ops:    &dyn OsOps,     // ← NUEVO
+    os_ops:    &dyn OsOps,
+    throttle:  Option<&crate::bandwidth::ThrottleHandle>,
 ) -> std::result::Result<Option<String>, CoreError> {
+    // Aplicar throttling a la lectura
+    if let Some(th) = throttle {
+        th.consume(entry.size);
+    }
+    
     let data = tokio::fs::read(&entry.source)
         .await
         .map_err(|e| CoreError::read(&entry.source, e))?;
@@ -205,6 +228,11 @@ async fn copy_small_file(
         }
     }
 
+    // Aplicar throttling a la escritura
+    if let Some(th) = throttle {
+        th.consume(size);
+    }
+    
     tokio::fs::write(&partial_dest, &data)
         .await
         .map_err(|e| CoreError::write(&partial_dest, e))?;
