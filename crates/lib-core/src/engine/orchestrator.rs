@@ -10,12 +10,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use walkdir::WalkDir;
 
+use crate::buffer_pool::BufferPool;
 use crate::checkpoint::{CheckpointState, FlowControl};
 use crate::config::EngineConfig;
 use crate::engine::block::BlockEngine;
 use crate::engine::swarm::SwarmEngine;
 use crate::error::Result;
-use crate::os_ops::OsOps;                 // ← NUEVO
+use crate::os_ops::OsOps;
 use crate::telemetry::{CopyProgress, TelemetrySink};
 
 #[derive(Debug)]
@@ -131,11 +132,18 @@ impl Orchestrator {
         }
 
         // ── 8. Motor de bloques ───────────────────────────────────────────
+        // Crear buffer pool solo para archivos grandes (optimización zero-alloc)
+        let buffer_pool = Some(BufferPool::new(
+            self.config.block_size_bytes,
+            self.config.channel_capacity * 2, // Doble capacidad para reader + writer
+        ));
+
         let block_engine = BlockEngine::new(
             Arc::clone(&self.config),
             self.flow.clone(),
             telemetry.handle(),
-            Arc::clone(&self.os_ops),            // ← NUEVO
+            Arc::clone(&self.os_ops),
+            buffer_pool,
         );
 
         for entry in large_files {

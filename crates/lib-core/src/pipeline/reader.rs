@@ -27,6 +27,7 @@ use std::path::Path;
 
 use crossbeam::channel::Sender;
 
+use crate::buffer_pool::BufferPool;
 use crate::checkpoint::FlowControl;
 use crate::config::EngineConfig;
 use crate::error::{CoreError, Result};
@@ -36,18 +37,20 @@ use crate::telemetry::TelemetryHandle;
 
 /// Lee el archivo origen y envía bloques al canal del pipeline.
 pub struct BlockReader {
-    config:    EngineConfig,
-    flow:      FlowControl,
-    telemetry: TelemetryHandle,
+    config:      EngineConfig,
+    flow:        FlowControl,
+    telemetry:   TelemetryHandle,
+    buffer_pool: Option<BufferPool>,
 }
 
 impl BlockReader {
     pub fn new(
-        config:    EngineConfig,
-        flow:      FlowControl,
-        telemetry: TelemetryHandle,
+        config:      EngineConfig,
+        flow:        FlowControl,
+        telemetry:   TelemetryHandle,
+        buffer_pool: Option<BufferPool>,
     ) -> Self {
-        Self { config, flow, telemetry }
+        Self { config, flow, telemetry, buffer_pool }
     }
 
     /// Lee `source_path` en bloques y los envía por `tx`.
@@ -96,11 +99,26 @@ impl BlockReader {
             }
 
             // ── Leer siguiente bloque ──────────────────────────────────────
-            let mut buf = vec![0u8; self.config.block_size_bytes];
+            // Usar buffer del pool si está disponible, sino aloca uno nuevo
+            let mut buf = if let Some(ref pool) = self.buffer_pool {
+                let mut buffer = pool.acquire();
+                // Leer directamente en el buffer del pool
+                let n = reader
+                    .read(buffer.as_mut_slice())
+                    .map_err(|e| CoreError::read(source_path, e))?;
+                buffer.set_len(n);
+                buffer.into_vec()
+            } else {
+                // Fallback: asignación tradicional
+                let mut buf = vec![0u8; self.config.block_size_bytes];
+                let n = reader
+                    .read(&mut buf)
+                    .map_err(|e| CoreError::read(source_path, e))?;
+                buf.truncate(n);
+                buf
+            };
 
-            let n = reader
-                .read(&mut buf)
-                .map_err(|e| CoreError::read(source_path, e))?;
+            let n = buf.len();
 
             if n == 0 {
                 // EOF: el canal se cierra cuando este método hace drop del tx.
@@ -109,9 +127,6 @@ impl BlockReader {
                 );
                 break;
             }
-
-            // Truncar al tamaño real leído (crítico para el último bloque)
-            buf.truncate(n);
 
             // ── Hash incremental del origen ────────────────────────────────
             if let Some(ref mut h) = hasher {

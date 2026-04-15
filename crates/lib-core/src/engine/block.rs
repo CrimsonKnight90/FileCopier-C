@@ -20,6 +20,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 
+use crate::buffer_pool::BufferPool;
 use crate::checkpoint::FlowControl;
 use crate::config::EngineConfig;
 use crate::error::{CoreError, Result};
@@ -29,20 +30,22 @@ use crate::telemetry::TelemetryHandle;
 
 /// Motor de copia para archivos grandes.
 pub struct BlockEngine {
-    config:    Arc<EngineConfig>,
-    flow:      FlowControl,
-    telemetry: TelemetryHandle,
-    os_ops:    Arc<dyn OsOps>,
+    config:      Arc<EngineConfig>,
+    flow:        FlowControl,
+    telemetry:   TelemetryHandle,
+    os_ops:      Arc<dyn OsOps>,
+    buffer_pool: Option<BufferPool>,
 }
 
 impl BlockEngine {
     pub fn new(
-        config:    Arc<EngineConfig>,
-        flow:      FlowControl,
-        telemetry: TelemetryHandle,
-        os_ops:    Arc<dyn OsOps>,
+        config:      Arc<EngineConfig>,
+        flow:        FlowControl,
+        telemetry:   TelemetryHandle,
+        os_ops:      Arc<dyn OsOps>,
+        buffer_pool: Option<BufferPool>,
     ) -> Self {
-        Self { config, flow, telemetry, os_ops }
+        Self { config, flow, telemetry, os_ops, buffer_pool }
     }
 
     /// Copia un archivo grande usando el pipeline de bloques.
@@ -67,6 +70,7 @@ impl BlockEngine {
         let flow_reader   = self.flow.clone();
         let telemetry_r   = self.telemetry.clone();
         let source_path   = source.to_path_buf();
+        let buffer_pool   = self.buffer_pool.clone();
 
         // ── Thread A: Reader ──────────────────────────────────────────────
         let reader_handle = thread::Builder::new()
@@ -77,7 +81,7 @@ impl BlockEngine {
                     .unwrap_or("?")
             ))
             .spawn(move || {
-                let reader = BlockReader::new(config_reader, flow_reader, telemetry_r);
+                let reader = BlockReader::new(config_reader, flow_reader, telemetry_r, buffer_pool);
                 reader.run(&source_path, tx)
             })
             .map_err(|e| {
